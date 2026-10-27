@@ -59,7 +59,9 @@
     finally{loading=false;}
   }
   // Geographic markers represent the country named in a record, never a precise plant.
-  let mapExtent='world', mapReady=false, mapFailed=false, mapCountries=[], countryLookup=new Map();
+  let mapExtent='world', mapReady=false, mapFailed=false, mapCountries=[], countryLookup=new Map(), mapGroups=new Map();
+  let camera=[0,0,1000,450], cameraFrame=0, tooltipMarker=null, tooltipTimer=0, mapDrag=null, suppressMapClick=false;
+  const reducedMapMotion=matchMedia('(prefers-reduced-motion: reduce)');
   const markerColors={strike:'var(--strike)',milestone:'var(--milestone)',risk:'var(--risk)',inactive:'var(--muted)'};
   const normalizeCountry=value=>String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');
   const countryAliases={'usa':'United States of America','us':'United States of America','unitedstates':'United States of America','uk':'United Kingdom','greatbritain':'United Kingdom','czechrepublic':'Czechia','southkorea':'South Korea','republicofkorea':'South Korea','northkorea':'North Korea','turkey':'Turkey','turkiye':'Turkey','russia':'Russia','russianfederation':'Russia','vietnam':'Vietnam','ivorycoast':"Ivory Coast",'cotedivoire':"Ivory Coast",'congodrc':'Democratic Republic of the Congo','drcongo':'Democratic Republic of the Congo','serbia':'Republic of Serbia','eswatini':'eSwatini','swaziland':'eSwatini'};
@@ -71,39 +73,107 @@
     const active=list.filter(isActive);
     return ['strike','milestone','risk'].find(kind=>active.some(e=>e.category===kind))||'inactive';
   }
-  function mapBounds(){return mapExtent==='europe'?[460,55,170,125]:[0,0,1000,450];}
+  function clampCamera(bounds){
+    const width=Math.max(110,Math.min(1000,bounds[2])),height=width*.45;
+    return [Math.max(0,Math.min(1000-width,bounds[0])),Math.max(0,Math.min(450-height,bounds[1])),width,height];
+  }
+  function updateMapCamera(announce=false){
+    const svg=$('world-map'),scale=camera[2]/1000;
+    svg.setAttribute('viewBox',camera.map(n=>n.toFixed(3)).join(' '));
+    svg.classList.toggle('is-zoomed',camera[2]<999);
+    let visible=0;
+    $('map-markers').querySelectorAll('[data-map-country]').forEach(marker=>{
+      const x=+marker.dataset.x,y=+marker.dataset.y,inView=x>=camera[0]&&x<=camera[0]+camera[2]&&y>=camera[1]&&y<=camera[1]+camera[3];
+      marker.setAttribute('transform','translate('+x+' '+y+') scale('+scale+')');
+      marker.setAttribute('tabindex',inView?'0':'-1');
+      if(inView){marker.removeAttribute('aria-hidden');visible++;}else marker.setAttribute('aria-hidden','true');
+    });
+    ['world','europe'].forEach(mode=>{$('map-'+mode).classList.toggle('active',mapExtent===mode);$('map-'+mode).setAttribute('aria-pressed',String(mapExtent===mode));});
+    if($('map-zoom-level'))$('map-zoom-level').textContent=(1000/camera[2]).toFixed(1)+'×';
+    if($('map-zoom-in'))$('map-zoom-in').disabled=camera[2]<=110.1;
+    if($('map-zoom-out'))$('map-zoom-out').disabled=camera[2]>=999.9;
+    if(announce){
+      const total=$('map-markers').children.length,count=[...mapGroups.values()].reduce((n,list)=>n+list.length,0);
+      const label=mapExtent==='world'?total+' mapped '+(total===1?'country':'countries'):(mapExtent==='europe'?'Europe view':mapExtent==='country'?$('country').value:'Map view')+' · '+visible+' of '+total+' mapped countries';
+      $('map-summary').textContent=label+' · '+count+' dated '+(count===1?'entry':'entries');
+      const unmapped=[...mapGroups].reduce((n,[country,list])=>{const point=lookupCountry(country);return n+(!point||!Number.isFinite(point.lon)||!Number.isFinite(point.lat)?list.length:0);},0);
+      let note='';
+      if(mapFailed)note='Map could not load. All matching entries remain available in the list.';
+      else if(!mapReady)note='Loading world map…';
+      else if(unmapped)note=unmapped+' '+(unmapped===1?'entry has':'entries have')+' no map location; '+(unmapped===1?'it is':'they are')+' included in the list.';
+      else if(total>visible)note='The list includes entries outside this zoom. Select World to see every mapped country.';
+      $('map-unmapped').textContent=note;$('map-unmapped').hidden=!note;
+    }
+  }
+  function hideMapTooltip(){
+    clearTimeout(tooltipTimer);
+    if(tooltipMarker)tooltipMarker.removeAttribute('aria-describedby');
+    tooltipMarker=null;
+    if($('map-tooltip'))$('map-tooltip').hidden=true;
+  }
+  function moveMapCamera(bounds,extent='custom',animate=true){
+    cancelAnimationFrame(cameraFrame);hideMapTooltip();mapExtent=extent;
+    const target=clampCamera(bounds),start=camera.slice();
+    if(!animate||reducedMapMotion.matches){camera=target;updateMapCamera(true);return;}
+    const began=performance.now();
+    function frame(now){
+      const progress=Math.min(1,(now-began)/520),ease=1-Math.pow(1-progress,3);
+      camera=start.map((value,i)=>value+(target[i]-value)*ease);updateMapCamera(progress===1);
+      if(progress<1)cameraFrame=requestAnimationFrame(frame);
+    }
+    cameraFrame=requestAnimationFrame(frame);
+  }
+  function zoomMap(factor){
+    const width=Math.max(110,Math.min(1000,camera[2]*factor)),height=width*.45;
+    moveMapCamera([camera[0]+(camera[2]-width)/2,camera[1]+(camera[3]-height)/2,width,height],width===1000?'world':'custom');
+  }
+  function focusMapCountry(name){
+    const point=lookupCountry(name);if(!point)return;
+    const record=(mapGroups.get(name)||[])[0],width=regionFor(record||{})==='Europe'?180:300;
+    moveMapCamera([(point.lon+180)*1000/360-width/2,(90-point.lat)*1000/360-width*.225,width,width*.45],'country');
+  }
+  function showMapTooltip(marker){
+    const tip=$('map-tooltip'),list=mapGroups.get(marker.dataset.mapCountry);
+    if(!tip||!list||mapDrag)return;
+    hideMapTooltip();tooltipMarker=marker;
+    const active=list.filter(isActive),ongoing=active.filter(e=>e.category==='strike'&&stateOf(e)==='ongoing').length;
+    const strikes=active.filter(e=>e.category==='strike').length,risks=active.filter(e=>e.category==='risk').length,milestones=active.filter(e=>e.category==='milestone').length;
+    const next=active.filter(e=>e.category==='strike'&&stateOf(e)!=='ongoing'&&e.date>=currentDay()).sort((a,b)=>a.date.localeCompare(b.date))[0];
+    const groups=[...new Set(list.map(e=>e.company).filter(Boolean))];
+    const counts=[strikes+' strike '+(strikes===1?'call':'calls'),risks?risks+' risk '+(risks===1?'window':'windows'):'',milestones?milestones+' '+(milestones===1?'milestone':'milestones'):''].filter(Boolean);
+    tip.innerHTML='<span class="map-tooltip-eyebrow">COUNTRY PREVIEW</span><strong class="map-tooltip-title">'+esc(marker.dataset.mapCountry)+'</strong><div class="map-tooltip-counts">'+counts.map(t=>'<span>'+esc(t)+'</span>').join('')+'</div><p class="map-tooltip-date">'+(ongoing?'<span class="map-tooltip-live">'+ongoing+' reported ongoing</span>':'')+(next?'<span>Next strike call · '+esc(fmt(next.date))+'</span>':!ongoing?'<span>No upcoming strike call in this selection</span>':'')+'</p><p class="map-tooltip-sectors"><span>Affected groups</span>'+esc(groups.slice(0,2).join(' · ')||'See source brief')+(groups.length>2?' <small>+'+(groups.length-2)+' more</small>':'')+'</p><span class="map-tooltip-hint">Select dot to zoom and explore · Country-level location</span>';
+    tip.hidden=false;marker.setAttribute('aria-describedby','map-tooltip');
+    const viewport=tip.parentElement.getBoundingClientRect(),anchor=marker.getBoundingClientRect(),width=tip.offsetWidth,height=tip.offsetHeight;
+    let left=anchor.left-viewport.left+anchor.width/2-width/2,top=anchor.top-viewport.top-height-12;
+    if(top<8)top=anchor.bottom-viewport.top+12;
+    tip.style.left=Math.max(8,Math.min(viewport.width-width-8,left))+'px';
+    tip.style.top=Math.max(8,Math.min(viewport.height-height-8,top))+'px';
+  }
   function renderMap(selected){
+    hideMapTooltip();
     const chosen=$('country').value, groups=new Map();
     selected.forEach(e=>{if(!groups.has(e.country))groups.set(e.country,[]);groups.get(e.country).push(e);});
-    const bounds=mapBounds();$('world-map').setAttribute('viewBox',bounds.join(' '));
-    ['world','europe'].forEach(mode=>{$('map-'+mode).classList.toggle('active',mapExtent===mode);$('map-'+mode).setAttribute('aria-pressed',String(mapExtent===mode));});
-    let unmapped=0,visibleCountries=0,mappedCountries=0;
+    mapGroups=groups;
+    const bounds=camera;
     const geometryWithEvents=new Set(),chosenGeometry=lookupCountry(chosen);
     const markers=[...groups].sort((a,b)=>a[0].localeCompare(b[0])).map(([country,list])=>{
       const point=lookupCountry(country);
-      if(!point||!Number.isFinite(point.lon)||!Number.isFinite(point.lat)){unmapped+=list.length;return '';}
-      mappedCountries++;geometryWithEvents.add(point.code);
+      if(!point||!Number.isFinite(point.lon)||!Number.isFinite(point.lat))return '';
+      geometryWithEvents.add(point.code);
       const x=(point.lon+180)*1000/360,y=(90-point.lat)*1000/360;
       const visible=x>=bounds[0]&&x<=bounds[0]+bounds[2]&&y>=bounds[1]&&y<=bounds[1]+bounds[3];
-      if(visible)visibleCountries++;
-      const kind=markerKind(list),scale=mapExtent==='europe'?0.3:1;
+      const kind=markerKind(list),scale=camera[2]/1000,ongoing=list.some(e=>e.category==='strike'&&stateOf(e)==='ongoing');
       const strikes=list.filter(e=>e.category==='strike'&&isActive(e)).length;
       const description=country+': '+list.length+' dated '+(list.length===1?'entry':'entries')+', '+strikes+' active strike '+(strikes===1?'call':'calls')+'. Select to filter. Approximate country marker.';
-      return '<g class="map-marker '+kind+(chosen===country?' is-selected':'')+'" data-map-country="'+esc(country)+'" role="button" tabindex="'+(visible?'0':'-1')+'" aria-label="'+esc(description)+'" aria-pressed="'+String(chosen===country)+'"'+(visible?'':' aria-hidden="true"')+' transform="translate('+x.toFixed(2)+' '+y.toFixed(2)+') scale('+scale+')" style="--marker-color:'+markerColors[kind]+'"><title>'+esc(description)+'</title><circle class="map-hit" r="15" fill="transparent"/><circle class="map-halo" r="12" fill="'+markerColors[kind]+'" opacity=".12"/><circle class="map-dot" r="'+(list.length>1?'7':'5.5')+'" fill="'+markerColors[kind]+'" stroke="var(--map-stroke, #101720)" stroke-width="2"/>'+(list.length>1?'<text class="map-dot-count" text-anchor="middle" dominant-baseline="central" font-size="8" font-weight="700" style="fill:var(--map)">'+list.length+'</text>':'')+'</g>';
+      return '<g class="map-marker '+kind+(ongoing?' is-ongoing':'')+(chosen===country?' is-selected':'')+'" data-map-country="'+esc(country)+'" data-x="'+x.toFixed(2)+'" data-y="'+y.toFixed(2)+'" role="button" tabindex="'+(visible?'0':'-1')+'" aria-label="'+esc(description)+(ongoing?' Reported ongoing strike.':'')+'" aria-pressed="'+String(chosen===country)+'"'+(visible?'':' aria-hidden="true"')+' transform="translate('+x.toFixed(2)+' '+y.toFixed(2)+') scale('+scale+')" style="--marker-color:'+markerColors[kind]+'"><circle class="map-hit" r="16" fill="transparent"/>'+(ongoing?'<circle class="map-pulse" r="10" aria-hidden="true"/>':'')+'<circle class="map-halo" r="12" fill="'+markerColors[kind]+'" opacity=".12"/><circle class="map-dot" r="'+(list.length>1?'7':'5.5')+'" fill="'+markerColors[kind]+'" stroke="var(--map-stroke, #101720)" stroke-width="2"/>'+(list.length>1?'<text class="map-dot-count" text-anchor="middle" dominant-baseline="central" font-size="8" font-weight="700" style="fill:var(--map)">'+list.length+'</text>':'')+'</g>';
     }).join('');
     $('map-markers').innerHTML=markers;
     $('country-paths').querySelectorAll('[data-country-code]').forEach(path=>{
       path.classList.toggle('has-events',geometryWithEvents.has(path.dataset.countryCode));
       path.classList.toggle('is-selected',chosenGeometry?.code===path.dataset.countryCode);
     });
-    $('map-summary').textContent=(mapExtent==='europe'?'Europe view · '+visibleCountries+' of '+mappedCountries+' mapped countries':mappedCountries+' mapped '+(mappedCountries===1?'country':'countries'))+' · '+selected.length+' dated '+(selected.length===1?'entry':'entries');
-    const mapNotes=[];
-    if(mapFailed)mapNotes.push('Map could not load. All matching entries remain available in the list.');
-    else if(!mapReady)mapNotes.push('Loading world map…');
-    else if(unmapped)mapNotes.push(unmapped+' '+(unmapped===1?'entry has':'entries have')+' no map location; '+(unmapped===1?'it is':'they are')+' included in the list.');
-    else if(mapExtent==='europe'&&mappedCountries>visibleCountries)mapNotes.push('The list includes entries outside this zoom. Select World to see every mapped country.');
-    $('map-unmapped').textContent=mapNotes.join(' ');$('map-unmapped').hidden=!mapNotes.length;
-    $('map-description').textContent='Dots group dated entries by approximate country location, not exact plants. Color shows strike calls first, then milestones, then risk windows. A dot does not confirm production loss.';
+    updateMapCamera(true);
+    $('map-description').textContent='Dots group dated entries by approximate country location, not exact plants. Color shows strike calls first, then milestones, then risk windows. Only reported ongoing strikes pulse. Hover or focus a dot for a preview; select to zoom and filter. Use plus and minus to zoom and arrow keys or drag to pan. A dot does not confirm production loss.';
     $('map-selection-title').textContent=chosen==='all'?($('state').value==='active'?'Upcoming & ongoing':'Matching entries'):chosen;
     $('clear-map-selection').hidden=chosen==='all';
     $('map-events').innerHTML=selected.length?selected.map(e=>{
@@ -130,12 +200,57 @@
   }
   function selectMapCountry(element){
     const name=element.dataset.mapCountry;
-    if([...$('country').options].some(option=>option.value===name)){$('country').value=name;render();$('clear-map-selection').focus();}
+    if([...$('country').options].some(option=>option.value===name)){$('country').value=name;render();focusMapCountry(name);$('clear-map-selection').focus({preventScroll:true});}
   }
-  $('map-markers').addEventListener('click',event=>{const marker=event.target.closest('[data-map-country]');if(marker)selectMapCountry(marker);});
+  $('map-markers').addEventListener('click',event=>{if(suppressMapClick){suppressMapClick=false;return;}const marker=event.target.closest('[data-map-country]');if(marker)selectMapCountry(marker);});
   $('map-markers').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){const marker=event.target.closest('[data-map-country]');if(marker){event.preventDefault();selectMapCountry(marker);}}});
-  $('clear-map-selection').addEventListener('click',()=>{$('country').value='all';render();$('map-world').focus();});
-  ['world','europe'].forEach(mode=>$('map-'+mode).addEventListener('click',()=>{mapExtent=mode;renderMap(selectedEvents());}));
+  $('map-markers').addEventListener('pointerover',event=>{const marker=event.target.closest('[data-map-country]');if(marker&&event.pointerType!=='touch'&&!marker.contains(event.relatedTarget))showMapTooltip(marker);});
+  $('map-markers').addEventListener('pointerout',event=>{const marker=event.target.closest('[data-map-country]');if(marker&&document.activeElement!==marker&&!marker.contains(event.relatedTarget))tooltipTimer=setTimeout(hideMapTooltip,180);});
+  $('map-markers').addEventListener('focusin',event=>{const marker=event.target.closest('[data-map-country]');if(marker)showMapTooltip(marker);});
+  $('map-markers').addEventListener('focusout',hideMapTooltip);
+  if($('map-tooltip')){
+    $('map-tooltip').addEventListener('pointerenter',()=>clearTimeout(tooltipTimer));
+    $('map-tooltip').addEventListener('pointerleave',()=>{if(document.activeElement!==tooltipMarker)tooltipTimer=setTimeout(hideMapTooltip,180);});
+  }
+  document.addEventListener('keydown',event=>{if(event.key==='Escape')hideMapTooltip();});
+  window.addEventListener('resize',hideMapTooltip);
+  $('clear-map-selection').addEventListener('click',()=>{$('country').value='all';render();moveMapCamera([0,0,1000,450],'world');$('map-world').focus({preventScroll:true});});
+  ['world','europe'].forEach(mode=>$('map-'+mode).addEventListener('click',()=>{moveMapCamera(mode==='europe'?[410,45,280,126]:[0,0,1000,450],mode);}));
+  if($('map-zoom-in'))$('map-zoom-in').addEventListener('click',()=>zoomMap(1/1.45));
+  if($('map-zoom-out'))$('map-zoom-out').addEventListener('click',()=>zoomMap(1.45));
+  if($('map-reset-view'))$('map-reset-view').addEventListener('click',()=>moveMapCamera([0,0,1000,450],'world'));
+  $('world-map').addEventListener('keydown',event=>{
+    if(event.target!==$('world-map'))return;
+    const directions={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]};
+    if(directions[event.key]){event.preventDefault();const [x,y]=directions[event.key];moveMapCamera([camera[0]+x*camera[2]*.18,camera[1]+y*camera[3]*.18,camera[2],camera[3]],camera[2]>=999?'world':'custom');}
+    else if(event.key==='+'||event.key==='='){event.preventDefault();zoomMap(1/1.45);}
+    else if(event.key==='-'){event.preventDefault();zoomMap(1.45);}
+    else if(event.key==='Home'){event.preventDefault();moveMapCamera([0,0,1000,450],'world');}
+  });
+  $('world-map').addEventListener('pointerdown',event=>{
+    suppressMapClick=false;
+    if(camera[2]>=999||event.button!==0||!event.isPrimary)return;
+    cancelAnimationFrame(cameraFrame);hideMapTooltip();
+    const rect=$('world-map').getBoundingClientRect(),unit=Math.min(rect.width/camera[2],rect.height/camera[3]);
+    mapDrag={id:event.pointerId,x:event.clientX,y:event.clientY,bounds:camera.slice(),unit,moved:false};
+  });
+  $('world-map').addEventListener('pointermove',event=>{
+    if(!mapDrag||event.pointerId!==mapDrag.id)return;
+    const dx=event.clientX-mapDrag.x,dy=event.clientY-mapDrag.y;
+    if(!mapDrag.moved&&Math.hypot(dx,dy)<5)return;
+    if(!mapDrag.moved){mapDrag.moved=true;$('world-map').setPointerCapture(event.pointerId);$('world-map').classList.add('is-panning');}
+    mapExtent='custom';camera=clampCamera([mapDrag.bounds[0]-dx/mapDrag.unit,mapDrag.bounds[1]-dy/mapDrag.unit,mapDrag.bounds[2],mapDrag.bounds[3]]);updateMapCamera();
+  });
+  function finishMapDrag(event){
+    if(!mapDrag||event.pointerId!==mapDrag.id)return;
+    suppressMapClick=mapDrag.moved;
+    if($('world-map').hasPointerCapture(event.pointerId))$('world-map').releasePointerCapture(event.pointerId);
+    mapDrag=null;$('world-map').classList.remove('is-panning');updateMapCamera(true);
+  }
+  $('world-map').addEventListener('pointerup',finishMapDrag);
+  $('world-map').addEventListener('pointercancel',finishMapDrag);
+  window.addEventListener('pointerup',finishMapDrag);
+  window.addEventListener('pointercancel',finishMapDrag);
   function setTheme(theme){
     const next=theme==='light'?'light':'dark';document.documentElement.dataset.theme=next;
     $('theme-toggle').setAttribute('aria-label',next==='dark'?'Switch to light mode':'Switch to dark mode');
@@ -181,7 +296,7 @@
   function showDetail(e,undated=false){const s=stateOf(e);$('detail-content').innerHTML=badge(e,undated)+'<h2 id="detail-title">'+esc(e.title)+'</h2><div class="detail-date">'+(undated?'No action date confirmed':esc(dateRange(e)))+(e.time?' · '+esc(e.time):'')+'</div><dl class="detail-facts"><div><dt>Company / exposure</dt><dd>'+esc(e.company||'—')+'</dd></div><div><dt>Location</dt><dd>'+esc([e.site,e.country,regionFor(e)].filter(Boolean).join(', '))+'</dd></div><div><dt>Current status</dt><dd>'+esc(stateNames[s]||s)+' · '+esc(e.status||'')+'</dd></div><div><dt>Relevance</dt><dd>'+esc(relevanceNames[e.relevance]||'General disruption')+'</dd></div><div><dt>Last checked</dt><dd>'+esc(fmt(e.lastChecked||data.asOf))+'</dd></div>'+(e.scope?'<div><dt>Scope</dt><dd>'+esc(e.scope)+'</dd></div>':'')+'</dl><div class="detail-section"><h3>What is known</h3><p>'+esc(e.summary)+'</p></div>'+(e.impact?'<div class="detail-section"><h3>Production / supply-chain relevance</h3><p>'+esc(e.impact)+'</p></div>':'')+'<div class="detail-section"><h3>Original sources</h3><ul class="source-list">'+sourceList(e.sources)+'</ul></div><div class="dialog-note">Last saved research: '+esc(timestamp(data.updatedAt||data.asOf))+'. A call does not confirm participation or lost production. Unknown end dates are not shown as an assumed continuous shutdown.</div>';$('detail-dialog').showModal();$('close-dialog').focus();}
   document.addEventListener('click',event=>{const b=event.target.closest('[data-event]'),w=event.target.closest('[data-watch]');if(b){const e=events.find(e=>e.id===b.dataset.event);if(e)showDetail(e);}if(w){const e=watchlist.find(e=>e.id===w.dataset.watch);if(e)showDetail(e,true);}});
   $('close-dialog').addEventListener('click',()=>$('detail-dialog').close());$('detail-dialog').addEventListener('click',event=>{if(event.target===$('detail-dialog')){const r=event.target.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)event.target.close();}});
-  ['region','country','category','relevance','state'].forEach(id=>$(id).addEventListener('change',render));$('search').addEventListener('input',render);$('reset').addEventListener('click',()=>{$('search').value='';['region','country','category','relevance'].forEach(id=>$(id).value='all');$('state').value='active';mapExtent='world';render();});
+  ['region','country','category','relevance','state'].forEach(id=>$(id).addEventListener('change',()=>{render();if(id==='country'){if($('country').value==='all')moveMapCamera([0,0,1000,450],'world');else focusMapCountry($('country').value);}}));$('search').addEventListener('input',render);$('reset').addEventListener('click',()=>{$('search').value='';['region','country','category','relevance'].forEach(id=>$(id).value='all');$('state').value='active';render();moveMapCamera([0,0,1000,450],'world');});
   $('prev-month').addEventListener('click',()=>{if(month>minMonth){month=new Date(Date.UTC(month.getUTCFullYear(),month.getUTCMonth()-1,1,12));render();}});$('next-month').addEventListener('click',()=>{if(month<maxMonth){month=new Date(Date.UTC(month.getUTCFullYear(),month.getUTCMonth()+1,1,12));render();}});['map','month','agenda'].forEach(v=>$(v+'-view').addEventListener('click',()=>{view=v;render();}));
   function download(filename,content,type){const url=URL.createObjectURL(new Blob([content],{type})),link=document.createElement('a');link.href=url;link.download=filename;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   function toast(message){clearTimeout(toastTimer);$('toast').textContent=message;$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,7000);}
