@@ -13,6 +13,7 @@
   const monthStart=iso=>new Date(Date.UTC(+iso.slice(0,4),+iso.slice(5,7)-1,1,12));
   const defaultEnd=iso=>{const d=dateObject(iso);d.setUTCMonth(d.getUTCMonth()+3);d.setUTCDate(d.getUTCDate()-1);return isoDate(d);};
   let data={events:[],watchlist:[],coverage:[],changes:[]}, events=[],watchlist=[], month, minMonth,maxMonth,view='map',toastTimer,loading=false,fetchError='',offline=location.protocol==='file:',hasServerData=false;
+  let timelineDay=null,timelineCursor=null,timelineTimer=0;
   function timestamp(value){if(!value)return 'Not recorded';const d=new Date(value);return Number.isNaN(d.valueOf())?fmt(value):new Intl.DateTimeFormat('en-GB',{dateStyle:'medium',timeStyle:'short',timeZone:'Europe/Prague'}).format(d)+' Prague';}
   function regionFor(e){if(regions.includes(e.region))return e.region;if(e.region==='Australia/Oceania'||e.region==='Oceania'||e.region==='Australia')return 'Australia / Oceania';return ({Mexico:'North America',Canada:'North America','United States':'North America',USA:'North America',Brazil:'South America',Argentina:'South America',Chile:'South America',Australia:'Australia / Oceania','New Zealand':'Australia / Oceania','South Africa':'Africa',India:'Asia',China:'Asia','South Korea':'Asia'})[e.country]||e.region||'Unspecified';}
   function stateOf(e){const declared=e.state||(e.category==='strike'?'announced':e.category||'risk');if(((declared==='ongoing'&&e.endDate)||( !['cancelled','postponed','ended','ongoing'].includes(declared)))&&validDate(e.date)&&(e.endDate||e.date)<currentDay())return 'past';return declared;}
@@ -21,8 +22,70 @@
   function visibleWindow(e){return validDate(e.date)&&e.date<=data.rangeEnd&&((e.endDate||e.date)>=data.rangeStart||stateOf(e)==='ongoing');}
   function filters(){return {q:$('search').value.trim().toLowerCase(),region:$('region').value,relevance:$('relevance').value,country:$('country').value,category:$('category').value,state:$('state').value};}
   function matches(e,undated=false){const f=filters(),s=stateOf(e);return (f.region==='all'||regionFor(e)===f.region)&&(f.relevance==='all'||e.relevance===f.relevance||(f.relevance==='nationwide'&&e.scope==='nationwide'))&&(f.country==='all'||e.country===f.country)&&(f.category==='all'||(undated?f.category==='risk':e.category===f.category))&&(f.state==='all'||(f.state==='active'?isActive(e):s===f.state))&&(!f.q||[e.title,e.company,e.country,e.site,e.summary,e.impact].join(' ').toLowerCase().includes(f.q));}
-  function selectedEvents(){return events.filter(e=>visibleWindow(e)&&matches(e));}
+  function eventOccursOn(e,day,today=currentDay()){
+    if(!validDate(e.date)||!validDate(day))return false;
+    if(validDate(e.endDate)&&e.endDate>=e.date)return e.date<=day&&day<=e.endDate;
+    return day===e.date||(stateOf(e)==='ongoing'&&e.date<=today&&day===today);
+  }
+  function selectedEvents(){return events.filter(e=>visibleWindow(e)&&matches(e)&&(!timelineDay||eventOccursOn(e,timelineDay)));}
   function selectedWatch(){return watchlist.filter(e=>matches(e,true));}
+  function timelineLength(){return Math.max(0,Math.round((dateObject(data.rangeEnd)-dateObject(data.rangeStart))/86400000));}
+  function timelineDateAt(index){const date=dateObject(data.rangeStart);date.setUTCDate(date.getUTCDate()+Math.max(0,Math.min(timelineLength(),Number(index)||0)));return isoDate(date);}
+  function timelineIndex(day){return Math.max(0,Math.min(timelineLength(),Math.round((dateObject(day)-dateObject(data.rangeStart))/86400000)));}
+  function syncTimelineBounds(){
+    timelineCursor=timelineDateAt(timelineIndex(timelineCursor||currentDay()));
+    if(timelineDay){timelineDay=timelineDateAt(timelineIndex(timelineDay));timelineCursor=timelineDay;month=monthStart(timelineDay);}
+    if(timelineTimer&&timelineCursor>=data.rangeEnd)pauseTimeline();
+  }
+  function updateTimelinePlayback(){
+    const playing=!!timelineTimer;
+    if($('timeline-play-icon'))$('timeline-play-icon').textContent=playing?'Ⅱ':'▶';
+    if($('timeline-play-label'))$('timeline-play-label').textContent=playing?'Pause':'Play';
+    if($('timeline-play')){$('timeline-play').setAttribute('aria-label',playing?'Pause timeline playback':'Play timeline day by day');$('timeline-play').setAttribute('aria-pressed',String(playing));}
+    if($('timeline'))$('timeline').classList.toggle('is-playing',playing);
+  }
+  function pauseTimeline(){clearInterval(timelineTimer);timelineTimer=0;updateTimelinePlayback();}
+  function selectTimelineDay(day){timelineDay=timelineDateAt(timelineIndex(day));timelineCursor=timelineDay;month=monthStart(timelineDay);render();}
+  function renderTimeline(selected){
+    if(!$('timeline-date'))return;
+    const length=timelineLength(),index=timelineIndex(timelineCursor||currentDay()),slider=$('timeline-date');
+    slider.min='0';slider.max=String(length);slider.step='1';slider.value=String(index);slider.disabled=false;
+    slider.style.setProperty('--timeline-progress',(length?index/length*100:0)+'%');
+    slider.setAttribute('aria-valuetext',timelineDay?fmt(timelineDay):fmt(timelineCursor||currentDay())+' — all dates shown; move to filter');
+    $('timeline-current').textContent=timelineDay?fmt(timelineDay,{weekday:'short',day:'numeric',month:'short',year:'numeric'}):'All dates';
+    $('timeline-start').textContent=fmt(data.rangeStart,{day:'numeric',month:'short'});$('timeline-end').textContent=fmt(data.rangeEnd,{day:'numeric',month:'short'});
+    $('timeline-all').setAttribute('aria-pressed',String(!timelineDay));$('timeline-all').classList.toggle('active',!timelineDay);
+    $('timeline').classList.toggle('is-date-selected',!!timelineDay);
+    if($('timeline-prev'))$('timeline-prev').disabled=index<=0;
+    if($('timeline-next'))$('timeline-next').disabled=index>=length;
+    $('timeline-play').disabled=length===0;
+    const active=selected.filter(isActive),strikes=active.filter(e=>e.category==='strike').length,other=active.filter(e=>e.category==='milestone'||e.category==='risk').length,inactive=selected.length-active.length;
+    $('timeline-summary').textContent=strikes+' strike '+(strikes===1?'call':'calls')+' · '+other+' milestones / risks'+(inactive?' · '+inactive+' inactive / unverified':'')+(timelineDay?' on this date':' across the planning window');
+    $('timeline-note').textContent='Published dates and known ranges only. Unknown end dates are not extended; reported ongoing strikes also appear today. Undated watch items stay separate.';
+    const ticks=new Map();
+    events.filter(e=>visibleWindow(e)&&matches(e)&&e.date>=data.rangeStart&&e.date<=data.rangeEnd).forEach(e=>{if(!ticks.has(e.date))ticks.set(e.date,[]);ticks.get(e.date).push(e);});
+    $('timeline-ticks').innerHTML=[...ticks].sort((a,b)=>a[0].localeCompare(b[0])).map(([day,list])=>{const position=length?timelineIndex(day)/length*100:0,kind=markerKind(list);return '<span class="timeline-tick '+kind+'" style="--tick-position:'+position+'%;left:'+position+'%" title="'+esc(fmt(day)+': '+list.length+' dated '+(list.length===1?'entry':'entries')+' starts')+'"></span>';}).join('');
+    updateTimelinePlayback();
+  }
+  if($('timeline-date')){
+    $('timeline-date').addEventListener('input',()=>{pauseTimeline();selectTimelineDay(timelineDateAt($('timeline-date').value));});
+    $('timeline-all').addEventListener('click',()=>{pauseTimeline();timelineDay=null;render();});
+    $('timeline-play').addEventListener('click',()=>{
+      if(timelineTimer){pauseTimeline();return;}
+      if(!month||timelineLength()===0)return;
+      if(!timelineDay)timelineDay=timelineDateAt(timelineIndex(currentDay()));
+      else if(timelineDay>=data.rangeEnd)timelineDay=data.rangeStart;
+      timelineCursor=timelineDay;month=monthStart(timelineDay);
+      timelineTimer=setInterval(()=>{
+        const next=timelineIndex(timelineDay)+1;
+        if(next>timelineLength()){pauseTimeline();return;}
+        if(next===timelineLength())pauseTimeline();
+        selectTimelineDay(timelineDateAt(next));
+      },1100);
+      render();
+    });
+    [['timeline-prev',-1],['timeline-next',1]].forEach(([id,step])=>{if($(id))$(id).addEventListener('click',()=>{pauseTimeline();selectTimelineDay(timelineDateAt(timelineIndex(timelineCursor||currentDay())+step));});});
+  }
   function badge(e,undated=false){const s=stateOf(e),inactive=['cancelled','postponed','ended','past','unverified'].includes(s);return '<span class="badge '+(inactive?'inactive':esc(undated?'watch':e.category))+'">'+esc(inactive?stateNames[s]:(s==='ongoing'?stateNames[s]:e.label||typeNames[undated?'watch':e.category]))+'</span>';}
   function renderHeader(){
     $('as-of').textContent=timestamp(data.updatedAt||data.asOf);
@@ -47,6 +110,7 @@
     minMonth=monthStart(data.rangeStart);maxMonth=monthStart(data.rangeEnd);if(!month)month=monthStart(data.asOf);if(month<minMonth)month=new Date(minMonth);if(month>maxMonth)month=new Date(maxMonth);
     const existing=$('country').value;$('country').innerHTML='<option value="all">All countries</option>';
     [...new Set([...events,...watchlist].map(e=>e.country).filter(Boolean))].sort().forEach(c=>{const o=document.createElement('option');o.value=c;o.textContent=c;$('country').append(o);});if([...$('country').options].some(o=>o.value===existing))$('country').value=existing;
+    syncTimelineBounds();
     render();
   }
   async function refresh(initial=false){
@@ -179,7 +243,7 @@
     $('map-events').innerHTML=selected.length?selected.map(e=>{
       const kind=isActive(e)?e.category:'inactive';
       return '<button type="button" class="map-event '+esc(kind)+'" data-event="'+esc(e.id)+'"><span class="map-event-top"><span>'+esc(e.country)+'</span><time datetime="'+esc(e.date)+'">'+esc(stateOf(e)==='ongoing'?'Ongoing':fmt(e.date,{day:'numeric',month:'short'}))+'</time></span><strong class="map-event-title">'+esc(e.title)+'</strong><span class="map-event-meta"><span><i class="swatch '+esc(kind)+'" aria-hidden="true"></i>'+esc(stateNames[stateOf(e)]||typeNames[e.category])+'</span><span aria-hidden="true">↗</span></span></button>';
-    }).join(''):'<div class="empty"><strong>No dated entries match.</strong>Try another country or reset your filters. An empty result does not establish that there is no strike risk.</div>';
+    }).join(''):'<div class="empty"><strong>'+(timelineDay?'No dated entries on '+esc(fmt(timelineDay))+'.':'No dated entries match.')+'</strong>'+(timelineDay?'Choose another date or All dates, or adjust your filters.':'Try another country or reset your filters.')+' An empty result does not establish that there is no strike risk.</div>';
   }
   async function loadMap(){
     try{
@@ -199,6 +263,7 @@
     if(month)renderMap(selectedEvents());
   }
   function selectMapCountry(element){
+    pauseTimeline();
     const name=element.dataset.mapCountry;
     if([...$('country').options].some(option=>option.value===name)){$('country').value=name;render();focusMapCountry(name);$('clear-map-selection').focus({preventScroll:true});}
   }
@@ -214,7 +279,7 @@
   }
   document.addEventListener('keydown',event=>{if(event.key==='Escape')hideMapTooltip();});
   window.addEventListener('resize',hideMapTooltip);
-  $('clear-map-selection').addEventListener('click',()=>{$('country').value='all';render();moveMapCamera([0,0,1000,450],'world');$('map-world').focus({preventScroll:true});});
+  $('clear-map-selection').addEventListener('click',()=>{pauseTimeline();$('country').value='all';render();moveMapCamera([0,0,1000,450],'world');$('map-world').focus({preventScroll:true});});
   ['world','europe'].forEach(mode=>$('map-'+mode).addEventListener('click',()=>{moveMapCamera(mode==='europe'?[410,45,280,126]:[0,0,1000,450],mode);}));
   if($('map-zoom-in'))$('map-zoom-in').addEventListener('click',()=>zoomMap(1/1.45));
   if($('map-zoom-out'))$('map-zoom-out').addEventListener('click',()=>zoomMap(1.45));
@@ -262,18 +327,17 @@
   setTheme(savedTheme);
   $('theme-toggle').addEventListener('click',()=>setTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));
   function eventButton(e){const s=stateOf(e),inactive=!isActive(e),kind=s==='ongoing'?'ONGOING':inactive?stateNames[s].toUpperCase():typeNames[e.category].toUpperCase();return '<button class="calendar-event '+esc(inactive?'inactive':e.category)+'" data-event="'+esc(e.id)+'" aria-label="'+esc(dateRange(e)+', '+stateNames[s]+': '+e.title)+'"><span class="event-type">'+esc(kind)+'</span><span class="event-title">'+esc(e.title)+'</span><span class="event-country">'+esc(e.country)+'</span></button>';}
-  function calendarDates(e){const start=e.date<data.rangeStart&&stateOf(e)==='ongoing'?data.rangeStart:e.date;return {start,end:e.endDate||start};}
   function renderCalendar(selected){
-    $('month-title').textContent=new Intl.DateTimeFormat('en-GB',{month:'long',year:'numeric',timeZone:'UTC'}).format(month);$('prev-month').disabled=month<=minMonth;$('next-month').disabled=month>=maxMonth;
+    $('month-title').textContent=new Intl.DateTimeFormat('en-GB',{month:'long',year:'numeric',timeZone:'UTC'}).format(month);$('prev-month').disabled=!!timelineDay||month<=minMonth;$('next-month').disabled=!!timelineDay||month>=maxMonth;
     const first=new Date(month);first.setUTCDate(1-((first.getUTCDay()+6)%7));const last=new Date(Date.UTC(month.getUTCFullYear(),month.getUTCMonth()+1,0,12)),cells=Math.ceil((((month.getUTCDay()+6)%7)+last.getUTCDate())/7)*7;
     let html=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(day=>'<div class="weekday">'+day+'</div>').join(''),count=0;
-    for(let i=0;i<cells;i++){const d=new Date(first);d.setUTCDate(first.getUTCDate()+i);const iso=isoDate(d),outside=d.getUTCMonth()!==month.getUTCMonth(),unavailable=iso<data.rangeStart||iso>data.rangeEnd,entries=unavailable?[]:selected.filter(e=>{const x=calendarDates(e);return x.start<=iso&&x.end>=iso;});if(!outside)count+=entries.length;
-      html+='<div class="day'+(outside?' outside':'')+(unavailable?' unavailable':'')+(iso===currentDay()?' today':'')+'" aria-label="'+esc(fmt(iso))+(unavailable?' — outside planning window':'')+'"><span class="day-number">'+d.getUTCDate()+'</span>'+entries.map(eventButton).join('')+'</div>';
+    for(let i=0;i<cells;i++){const d=new Date(first);d.setUTCDate(first.getUTCDate()+i);const iso=isoDate(d),outside=d.getUTCMonth()!==month.getUTCMonth(),unavailable=iso<data.rangeStart||iso>data.rangeEnd,entries=unavailable||(timelineDay&&iso!==timelineDay)?[]:selected.filter(e=>eventOccursOn(e,iso));if(!outside)count+=entries.length;
+      html+='<div class="day'+(outside?' outside':'')+(unavailable?' unavailable':'')+(iso===currentDay()?' today':'')+(timelineDay?(iso===timelineDay?' timeline-selected':' timeline-muted'):'')+'" aria-label="'+esc(fmt(iso))+(unavailable?' — outside planning window':'')+(timelineDay===iso?' — selected timeline date':'')+'"><span class="day-number">'+d.getUTCDate()+'</span>'+entries.map(eventButton).join('')+'</div>';
     }
-    if(!count)html+='<div class="empty"><strong>No dated entries in this month for these filters.</strong>Use Agenda for the full planning window. An empty month does not establish that there is no strike risk.</div>';
+    if(!count)html+='<div class="empty"><strong>'+(timelineDay?'No dated entries match '+esc(fmt(timelineDay))+'.':'No dated entries in this month for these filters.')+'</strong>'+(timelineDay?'Choose another date or All dates.':'Use List for matching entries across the planning window.')+' An empty result does not establish that there is no strike risk.</div>';
     $('calendar').innerHTML=html;
   }
-  function renderAgenda(selected){let previous='';$('agenda').innerHTML=selected.length?selected.map(e=>{const key=e.date.slice(0,7),heading=key!==previous?'<h4 class="agenda-month">'+esc(fmt(e.date,{month:'long',year:'numeric'}))+'</h4>':'';previous=key;return heading+'<button class="agenda-row" data-event="'+esc(e.id)+'"><span class="agenda-date">'+esc(e.date.slice(8,10))+'<small>'+esc(fmt(e.date,{month:'short'}))+'</small></span><span class="agenda-main">'+badge(e)+'<strong>'+esc(e.title)+'</strong><small>'+esc(e.company)+(e.site?' · '+esc(e.site):'')+' · '+esc(stateNames[stateOf(e)])+'</small></span><span class="agenda-country">'+esc(e.country)+'</span><span aria-hidden="true">↗</span></button>';}).join(''):'<div class="empty"><strong>No dated entries match these filters.</strong>Reset filters or choose another region or status.</div>';}
+  function renderAgenda(selected){let previous='';$('agenda').innerHTML=selected.length?selected.map(e=>{const key=e.date.slice(0,7),heading=key!==previous?'<h4 class="agenda-month">'+esc(fmt(e.date,{month:'long',year:'numeric'}))+'</h4>':'';previous=key;return heading+'<button class="agenda-row" data-event="'+esc(e.id)+'"><span class="agenda-date">'+esc(e.date.slice(8,10))+'<small>'+esc(fmt(e.date,{month:'short'}))+'</small></span><span class="agenda-main">'+badge(e)+'<strong>'+esc(e.title)+'</strong><small>'+esc(e.company)+(e.site?' · '+esc(e.site):'')+' · '+esc(stateNames[stateOf(e)])+'</small></span><span class="agenda-country">'+esc(e.country)+'</span><span aria-hidden="true">↗</span></button>';}).join(''):'<div class="empty"><strong>No dated entries match these filters.</strong>Choose All dates or adjust your filters.</div>';}
   function renderWatch(selected){$('watchlist').innerHTML=selected.length?selected.map(e=>'<button class="watch-card" data-watch="'+esc(e.id)+'"><div class="watch-top"><span>'+esc(e.company)+'</span><span>'+esc(e.country)+'</span></div><h3>'+esc(e.title)+'</h3><p>'+esc(e.summary)+'</p><span class="read-brief">Read source brief ↗</span></button>').join(''):'<div class="empty"><strong>No undated watch items match these filters.</strong>Unscheduled signals are kept separate from dated strikes.</div>';}
   function renderChanges(){const changes=Array.isArray(data.changes)?data.changes.slice(0,12):[];$('recent-changes').innerHTML=changes.length?changes.map(c=>'<article class="change-item"><div><span class="change-date">'+esc(fmt(c.date))+'</span>'+(c.state?'<span class="change-state">'+esc(stateNames[c.state]||c.state)+'</span>':'')+'</div><strong>'+esc(c.title)+'</strong><p>'+esc(c.description)+'</p></article>').join(''):'<p class="panel-empty">No change log is available yet. New calls, date changes, cancellations and ended action will appear here after a verified update.</p>';
     const coverage=Array.isArray(data.coverage)?data.coverage:[];$('region-coverage').innerHTML=regions.map(region=>{const c=coverage.find(x=>x.region===region||(region==='Australia / Oceania'&&['Australia/Oceania','Oceania','Australia'].includes(x.region)));return '<article class="coverage-item"><div><strong>'+esc(region)+'</strong><small>'+(c?.checkedAt?'Checked '+esc(fmt(c.checkedAt)):'Review not recorded')+'</small></div><p>'+esc(c?.note||'No regional review has been recorded. No conclusion about strike activity can be drawn.')+'</p></article>';}).join('');}
@@ -284,19 +348,19 @@
     $('watch-count').textContent=selected.filter(e=>e.category!=='strike'&&isActive(e)).length;
     $('undated-count').textContent=undated.length;
     $('vw-count').textContent=[...selected,...undated].filter(e=>e.relevance==='vw'&&isActive(e)).length;
-    $('result-count').textContent=selected.length+' dated '+(selected.length===1?'entry':'entries')+' · '+($('region').value==='all'?'Worldwide':$('region').value)+' · '+fmt(data.rangeStart)+' – '+fmt(data.rangeEnd);
+    $('result-count').textContent=selected.length+' dated '+(selected.length===1?'entry':'entries')+' · '+($('region').value==='all'?'Worldwide':$('region').value)+' · '+(timelineDay?fmt(timelineDay):fmt(data.rangeStart)+' – '+fmt(data.rangeEnd));
     $('calendar').hidden=view!=='month';$('agenda').hidden=view!=='agenda';$('map-panel').hidden=view!=='map';
     ['map','month','agenda'].forEach(v=>{$(v+'-view').classList.toggle('active',view===v);$(v+'-view').setAttribute('aria-pressed',String(view===v));});
     document.querySelector('.month-navigation').hidden=view!=='month';
     if($('calendar-tools'))$('calendar-tools').hidden=view!=='month';
-    renderHeader();renderMap(selected);renderCalendar(selected);renderAgenda(selected);renderWatch(undated);renderChanges();
+    renderHeader();renderTimeline(selected);renderMap(selected);renderCalendar(selected);renderAgenda(selected);renderWatch(undated);renderChanges();
     $('export-ics').disabled=!selected.length;$('export-csv').disabled=!selected.length;
   }
   function sourceList(sources){return (sources||[]).map(s=>{let url;try{url=new URL(s.url);if(!['https:','http:'].includes(url.protocol))return '';}catch{return '';}return '<li><a href="'+esc(url.href)+'" target="_blank" rel="noopener noreferrer">'+esc(s.name||url.hostname)+' ↗</a><small>'+(s.published?'Published / updated '+esc(fmt(s.published))+' · ':'')+esc(url.hostname)+'</small></li>';}).join('');}
-  function showDetail(e,undated=false){const s=stateOf(e);$('detail-content').innerHTML=badge(e,undated)+'<h2 id="detail-title">'+esc(e.title)+'</h2><div class="detail-date">'+(undated?'No action date confirmed':esc(dateRange(e)))+(e.time?' · '+esc(e.time):'')+'</div><dl class="detail-facts"><div><dt>Company / exposure</dt><dd>'+esc(e.company||'—')+'</dd></div><div><dt>Location</dt><dd>'+esc([e.site,e.country,regionFor(e)].filter(Boolean).join(', '))+'</dd></div><div><dt>Current status</dt><dd>'+esc(stateNames[s]||s)+' · '+esc(e.status||'')+'</dd></div><div><dt>Relevance</dt><dd>'+esc(relevanceNames[e.relevance]||'General disruption')+'</dd></div><div><dt>Last checked</dt><dd>'+esc(fmt(e.lastChecked||data.asOf))+'</dd></div>'+(e.scope?'<div><dt>Scope</dt><dd>'+esc(e.scope)+'</dd></div>':'')+'</dl><div class="detail-section"><h3>What is known</h3><p>'+esc(e.summary)+'</p></div>'+(e.impact?'<div class="detail-section"><h3>Production / supply-chain relevance</h3><p>'+esc(e.impact)+'</p></div>':'')+'<div class="detail-section"><h3>Original sources</h3><ul class="source-list">'+sourceList(e.sources)+'</ul></div><div class="dialog-note">Last saved research: '+esc(timestamp(data.updatedAt||data.asOf))+'. A call does not confirm participation or lost production. Unknown end dates are not shown as an assumed continuous shutdown.</div>';$('detail-dialog').showModal();$('close-dialog').focus();}
+  function showDetail(e,undated=false){pauseTimeline();const s=stateOf(e);$('detail-content').innerHTML=badge(e,undated)+'<h2 id="detail-title">'+esc(e.title)+'</h2><div class="detail-date">'+(undated?'No action date confirmed':esc(dateRange(e)))+(e.time?' · '+esc(e.time):'')+'</div><dl class="detail-facts"><div><dt>Company / exposure</dt><dd>'+esc(e.company||'—')+'</dd></div><div><dt>Location</dt><dd>'+esc([e.site,e.country,regionFor(e)].filter(Boolean).join(', '))+'</dd></div><div><dt>Current status</dt><dd>'+esc(stateNames[s]||s)+' · '+esc(e.status||'')+'</dd></div><div><dt>Relevance</dt><dd>'+esc(relevanceNames[e.relevance]||'General disruption')+'</dd></div><div><dt>Last checked</dt><dd>'+esc(fmt(e.lastChecked||data.asOf))+'</dd></div>'+(e.scope?'<div><dt>Scope</dt><dd>'+esc(e.scope)+'</dd></div>':'')+'</dl><div class="detail-section"><h3>What is known</h3><p>'+esc(e.summary)+'</p></div>'+(e.impact?'<div class="detail-section"><h3>Production / supply-chain relevance</h3><p>'+esc(e.impact)+'</p></div>':'')+'<div class="detail-section"><h3>Original sources</h3><ul class="source-list">'+sourceList(e.sources)+'</ul></div><div class="dialog-note">Last saved research: '+esc(timestamp(data.updatedAt||data.asOf))+'. A call does not confirm participation or lost production. Unknown end dates are not shown as an assumed continuous shutdown.</div>';$('detail-dialog').showModal();$('close-dialog').focus();}
   document.addEventListener('click',event=>{const b=event.target.closest('[data-event]'),w=event.target.closest('[data-watch]');if(b){const e=events.find(e=>e.id===b.dataset.event);if(e)showDetail(e);}if(w){const e=watchlist.find(e=>e.id===w.dataset.watch);if(e)showDetail(e,true);}});
   $('close-dialog').addEventListener('click',()=>$('detail-dialog').close());$('detail-dialog').addEventListener('click',event=>{if(event.target===$('detail-dialog')){const r=event.target.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)event.target.close();}});
-  ['region','country','category','relevance','state'].forEach(id=>$(id).addEventListener('change',()=>{render();if(id==='country'){if($('country').value==='all')moveMapCamera([0,0,1000,450],'world');else focusMapCountry($('country').value);}}));$('search').addEventListener('input',render);$('reset').addEventListener('click',()=>{$('search').value='';['region','country','category','relevance'].forEach(id=>$(id).value='all');$('state').value='active';render();moveMapCamera([0,0,1000,450],'world');});
+  ['region','country','category','relevance','state'].forEach(id=>$(id).addEventListener('change',()=>{pauseTimeline();render();if(id==='country'){if($('country').value==='all')moveMapCamera([0,0,1000,450],'world');else focusMapCountry($('country').value);}}));$('search').addEventListener('input',()=>{pauseTimeline();render();});$('reset').addEventListener('click',()=>{pauseTimeline();timelineDay=null;timelineCursor=month?timelineDateAt(timelineIndex(currentDay())):null;$('search').value='';['region','country','category','relevance'].forEach(id=>$(id).value='all');$('state').value='active';render();moveMapCamera([0,0,1000,450],'world');});
   $('prev-month').addEventListener('click',()=>{if(month>minMonth){month=new Date(Date.UTC(month.getUTCFullYear(),month.getUTCMonth()-1,1,12));render();}});$('next-month').addEventListener('click',()=>{if(month<maxMonth){month=new Date(Date.UTC(month.getUTCFullYear(),month.getUTCMonth()+1,1,12));render();}});['map','month','agenda'].forEach(v=>$(v+'-view').addEventListener('click',()=>{view=v;render();}));
   function download(filename,content,type){const url=URL.createObjectURL(new Blob([content],{type})),link=document.createElement('a');link.href=url;link.download=filename;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   function toast(message){clearTimeout(toastTimer);$('toast').textContent=message;$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,7000);}
@@ -307,5 +371,5 @@
     selected.forEach(e=>{const end=dateObject(e.endDate||e.date);end.setUTCDate(end.getUTCDate()+1);const s=stateOf(e),description=[typeNames[e.category],stateNames[s],e.status,e.summary,e.impact,e.time?'Published time: '+e.time:'','Last checked: '+(e.lastChecked||data.asOf),'Snapshot only. No subscription to later changes. All-day placement does not establish duration or production loss.',...sourceDescription(e)].filter(Boolean).join('\n\n');const status=s==='cancelled'?'CANCELLED':(['risk','postponed','past','unverified'].includes(s)||e.status==='Conditional deadline'?'TENTATIVE':'CONFIRMED');lines.push('BEGIN:VEVENT','UID:'+icsEscape(e.id)+'@auto-strike-watch.local','DTSTAMP:'+stamp,'SEQUENCE:'+(Number(data.revision)||0),'DTSTART;VALUE=DATE:'+e.date.replaceAll('-',''),'DTEND;VALUE=DATE:'+isoDate(end).replaceAll('-',''),'SUMMARY:'+icsEscape('['+stateNames[s]+'] '+e.title),'DESCRIPTION:'+icsEscape(description),'LOCATION:'+icsEscape([e.site,e.country].filter(Boolean).join(', ')),'TRANSP:TRANSPARENT','STATUS:'+status);if(e.sources?.[0]?.url)lines.push('URL:'+e.sources[0].url);lines.push('END:VEVENT');});
     lines.push('END:VCALENDAR');download('auto-strike-watch-'+data.asOf+'.ics',lines.map(foldLine).join('\r\n')+'\r\n','text/calendar;charset=utf-8');toast('Filtered calendar snapshot downloaded. Future changes are not subscribed.');});
   $('export-csv').addEventListener('click',()=>{const selected=selectedEvents();if(!selected.length)return;const columns=['Start date','End date','Entry type','State','Title','Company','Region','Country','Site','Relevance','Scope','Status detail','Summary','Impact / uncertainty','Published time','Last checked','Sources with dates','Snapshot date','Revision'];const safe=value=>{let s=String(value??'');if(/^[=+\-@\t\r]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';};const rows=[columns,...selected.map(e=>[e.date,e.endDate||'',typeNames[e.category],stateNames[stateOf(e)],e.title,e.company,regionFor(e),e.country,e.site,relevanceNames[e.relevance],e.scope,e.status,e.summary,e.impact,e.time,e.lastChecked||data.asOf,sourceDescription(e).join(' | '),data.asOf,data.revision])];download('auto-strike-watch-'+data.asOf+'.csv','\uFEFF'+rows.map(row=>row.map(safe).join(',')).join('\r\n'),'text/csv;charset=utf-8');toast('Filtered CSV downloaded with status, source dates and last-checked dates.');});
-  loadMap();refresh(true);setInterval(()=>{if(!document.hidden)refresh();},5*60*1000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
+  loadMap();refresh(true);setInterval(()=>{if(!document.hidden)refresh();},5*60*1000);document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseTimeline();else refresh();});
 })();
