@@ -53,7 +53,7 @@ Browser sign-out clears the current session even if the network is unavailable. 
 
 ## Verification
 
-All 38 local client checks passed, including a browser-fetch receiver regression check. Live SQL checks passed for anonymous access, signed-in non-members, viewer restrictions, editor and owner permissions, membership revocation, and revision conflicts. Those checks ran in rollback-isolated transactions; temporary fixtures were removed and the supplier dataset was unchanged. A separate anonymous REST request was denied with HTTP 401. These results verify the deployed database controls; owner password setup and the final hosted browser flow remain to be completed.
+All 46 local client checks passed, including authentication, logout races, map startup cancellation, geographic bounds, private marker properties and a browser-fetch receiver regression check. Live SQL checks passed for anonymous access, signed-in non-members, viewer restrictions, editor and owner permissions, membership revocation, and revision conflicts. Those checks ran in rollback-isolated transactions; temporary fixtures were removed and the supplier dataset was unchanged. A separate anonymous REST request was denied with HTTP 401. These results verify the deployed database controls; owner password setup and the final hosted browser flow remain to be completed.
 
 `node --test auth-core.test.mjs` checks the client-side session lifecycle, active membership checks, viewer restrictions, conflict handling, logout races, invitation/recovery callbacks, and password setup using controlled responses. These tests do **not** replace the live database and email-flow checks above.
 
@@ -61,3 +61,13 @@ Maintenance notes: leaked-password protection is unavailable on the project's cu
 
 Provider references: [row-level security](https://supabase.com/docs/guides/database/postgres/row-level-security), [user sessions](https://supabase.com/docs/guides/auth/sessions), [sign-out behavior](https://supabase.com/docs/guides/auth/signout), [email templates and token hashes](https://supabase.com/docs/guides/auth/auth-email-templates), [OTP verification](https://supabase.com/docs/reference/javascript/auth-verifyotp), [password updates](https://supabase.com/docs/reference/javascript/auth-updateuser), and [Auth REST endpoints](https://supabase.github.io/auth/).
 
+
+## Night mode and detailed maps
+
+The header appearance toggle works on sign-in, password setup and the workspace. It follows system appearance until the user chooses a mode, then remembers that choice in local storage and synchronizes it between tabs. Only the appearance preference is stored there; supplier records remain in the private workspace.
+
+The authenticated workspace uses MapLibre GL JS with OpenFreeMap Liberty and Dark maps. Nearby suppliers are clustered, and the register has a Show on map action. The detailed map initializes after verified membership and is destroyed on sign-out. Its GeoJSON contains coordinates, row IDs and precision only. If the map library, WebGL or basemap cannot initialize, the Natural Earth map remains available.
+
+No Google or Apple account or API key is configured. Map provider attribution and request privacy details are in ../ATTRIBUTION.md.
+
+Browser checks used fictional local preview records: day/night toggle and persistence, detailed light/dark maps, marker clustering, supplier focus, filtering, map expansion and Escape. The live private dataset was not changed during this update.
