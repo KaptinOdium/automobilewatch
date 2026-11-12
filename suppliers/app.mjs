@@ -1,5 +1,5 @@
 import {norm,parseSuppliers,csvExport,point} from './core.mjs';
-import {AuthClient,configured,AccessError,ConflictError} from './auth-core.mjs';
+import {AuthClient,configured,AccessError,ConflictError} from './auth-core.mjs?v=20261112-2';
 import {setIdentity} from './auth-state.mjs';
 const $=id=>document.getElementById(id),NS='http://www.w3.org/2000/svg';let lastLookupAt=0;let rows=[],world=[],cities=[],cityIndex=new Map(),countryIndex=new Map(),cache=new Map(),selected=null,busy=false,cancel=false,view=[0,0,1000,500];
 let auth=null,identity=null,revision=0,dirty=false,saving=false,loading=false,loaded=false,epoch=0,checking=false,lookupAbort=null;

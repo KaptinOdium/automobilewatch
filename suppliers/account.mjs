@@ -1,4 +1,4 @@
-import { AuthClient, AccessError, configured, consumeAccountLink } from './auth-core.mjs';
+import { AuthClient, AccessError, configured, consumeAccountLink } from './auth-core.mjs?v=20261112-2';
 
 const $ = id => document.getElementById(id);
 let auth = null;

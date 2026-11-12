@@ -25,6 +25,24 @@ function setup({ role = 'editor', members, handler = () => response(null) } = {}
 }
 function deferred() { let resolve; const promise = new Promise(done => resolve = done); return { promise, resolve }; }
 
+test('default browser fetch keeps its required global receiver', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = function (url) {
+    if (this !== globalThis) throw new TypeError('Illegal invocation');
+    calls++;
+    assert.equal(url, config.url + '/auth/v1/health');
+    return Promise.resolve(response({ ok: true }));
+  };
+  try {
+    const client = new AuthClient(config);
+    assert.deepEqual(await client.request('/auth/v1/health'), { ok: true });
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('configuration only accepts HTTPS origins and public keys', () => {
   assert.equal(configured({}), null);
   assert.deepEqual(configured({ supabaseUrl: config.url + '/', supabaseAnonKey: config.key }), config);

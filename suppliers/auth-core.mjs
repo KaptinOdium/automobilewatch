@@ -41,7 +41,7 @@ export function configured(raw) {
 }
 
 export class AuthClient {
-  constructor(config, { fetcher = fetch, storage = null, now = () => Date.now() } = {}) {
+  constructor(config, { fetcher = (...args) => globalThis.fetch(...args), storage = null, now = () => Date.now() } = {}) {
     this.config = config;
     this.fetcher = fetcher;
     this.storage = storage;
