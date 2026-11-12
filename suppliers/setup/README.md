@@ -2,25 +2,36 @@
 
 The GitHub Pages interface is public code. Supplier records are held in the authenticated database and must never be committed to the GitHub repository. A login form alone does not protect static files.
 
-1. Use a Supabase project controlled by the site owner. Run `supabase.sql` in its SQL editor. The transaction creates the main empty dataset, enables row-level security, and allows only active members to read it. Only owners and editors can save.
-2. Disable new public sign-ups and anonymous sign-ins in Auth settings. Set the Site URL to `https://kaptinodium.github.io/automobilewatch/suppliers/`. Add the exact account callback `https://kaptinodium.github.io/automobilewatch/suppliers/account.html` to the redirect allowlist. Configure the two email templates below **before** creating invitations or requesting a password reset.
-3. Invite the two Auth accounts through Supabase's administrator dashboard using the owner's and Tudor's verified addresses. Add the memberships in step 4 before either person opens their invitation. Each recipient sets their own password on `account.html`, then signs in normally. Do not put passwords, service-role keys, secret keys, or invitation tokens in GitHub. For an existing account, the administrator can send a password recovery email from Auth user management; use the Reset password template below.
-4. Copy their Auth user UUIDs into the following SQL, replacing the placeholders. The owner can edit; Tudor is an editor as a collaborator. Use `viewer` instead if read-only access is intended.
+## Activation status — 12 November 2026
+
+The owner-controlled Supabase project `oovcwefatlebysksjbvd` is active and healthy. The create-only supplier schema has been applied. This site revision includes the project URL and browser-safe publishable key. The owner Auth account exists with active owner membership; no collaborator access has been created. Public sign-ups and anonymous sign-ins are disabled, and the exact site and account callback URLs are configured.
+
+The owner has not set a password yet. A private one-time password-setup link was generated without sending an email; it is deliberately excluded from this repository. The temporary account-provisioning endpoint has been replaced with an HTTP 410 response and verified disabled. Live database authorization checks have passed, as recorded below. The remaining user-facing step is password setup followed by normal browser sign-in and a save/reload check.
+
+## Complete owner activation
+
+1. Project, schema, owner Auth account, and active owner membership are already present. Do not recreate them. Retain `supabase.sql` for a clean installation; it is a create-only transaction and must not be rerun against this provisioned schema.
+2. Keep public sign-ups and anonymous sign-ins disabled. The Site URL is `https://kaptinodium.github.io/automobilewatch/suppliers/`, with the exact account callback `https://kaptinodium.github.io/automobilewatch/suppliers/account.html` on the redirect allowlist.
+3. After the configured revision is published, the owner opens the private setup link, chooses a password on `account.html`, then signs in normally. Do not store the link, password, email address, or Auth UUID in public repository files. If the link expires or has already been used, an administrator must issue a new setup link.
+4. Verify the hosted page uses the configured project, normal owner sign-in succeeds, and the shared list can be loaded, saved, and reloaded. Check revision-conflict handling from two browser sessions after password setup. The database-side permissions and conflict behavior have already passed rollback-isolated checks.
+
+## Add a collaborator later
+
+Create or invite a collaborator only when access is requested. Use their verified address, add their Auth UUID to `supplier_members`, and let them choose their own password. Grant `viewer` for read-only access or `editor` when they need to save changes; the owner role is not needed for ordinary collaboration.
 
 ```sql
 insert into public.supplier_members (user_id, display_name, role, active)
 values
-  ('OWNER_AUTH_UUID', 'Jack', 'owner', true),
-  ('TUDOR_AUTH_UUID', 'Tudor', 'editor', true);
+  ('COLLABORATOR_AUTH_UUID', 'Collaborator', 'viewer', true);
 ```
 
-5. Set `supabaseUrl` and `supabaseAnonKey` in `config.json` to the project URL and **publishable key** (or legacy public `anon` key). These are intended for browser use. All access enforcement remains in the database policies and save function.
-6. Before importing real supplier information, verify the deployed database with an anonymous request, a signed-in non-member, an active editor, and an active viewer. Anonymous/non-member reads must fail or return no rows; a viewer must be unable to call the save function or write tables directly. Direct table writes are denied even for editors: the save function is the only write path.
-7. Test editing from two sessions: load the same revision in each, save in one, then save in the other. The second save must report a conflict and require reloading. Review the local changes before replacing the shared list.
+Complete membership before the collaborator opens an invitation or recovery link. All active members use the same saved supplier list.
 
 ## Invitation and recovery email templates
 
-In Supabase Auth > Email Templates, replace the action link in **Invite user** with:
+Custom SMTP is not configured. The dashboard requires custom SMTP before email templates can be edited, so the templates below are not installed and email callbacks/delivery have not been tested. Default email links are not supported by this site's token-hash callback. Use direct administrator-generated token-hash links for the current owner activation and password resets; never publish those private links.
+
+To enable emailed invitations or recovery later, configure an owner-controlled SMTP sender, install these templates, and test delivery. In Supabase Auth > Email Templates, replace the action link in **Invite user** with:
 
 ```html
 <a href="https://kaptinodium.github.io/automobilewatch/suppliers/account.html#token_hash={{ .TokenHash }}&amp;type=invite">Set your Supplier Atlas password</a>
@@ -34,7 +45,7 @@ Replace the action link in **Reset password** with:
 
 Use these links rather than the default `{{ .ConfirmationURL }}`. The page supports only `invite` and `recovery` token-hash callbacks, not default access-token fragments or PKCE authorization-code redirects. Fragment values are not sent in the request to GitHub Pages. The page removes the fragment immediately, verifies the one-time hash with Supabase, and keeps its temporary session only in memory. It never loads supplier records. Only an active member can proceed to password setup. After a successful change, it signs out the temporary session and links back to the normal login page.
 
-The new password must contain at least 12 characters and meet the project's password policy. Set Supabase's minimum password length to at least 12 as well. Expired/used links or accounts with missing membership need an administrator to correct membership and issue a fresh link. Reloading the setup page deliberately discards its temporary session. Test both the invitation and recovery flow with a controlled account before relying on delivery. If the project's email service restricts recipients, configure an owner-controlled SMTP sender before inviting the two users; never share administrator credentials with them.
+The new password must contain at least 12 characters and meet the project's password policy. Supabase's minimum password length is configured to 12. Expired/used links or accounts with missing membership need an administrator to correct membership and issue a fresh link. Reloading the setup page deliberately discards its temporary session. Test both the invitation and recovery flow with a controlled account before relying on delivery. If the project's email service restricts recipients, configure an owner-controlled SMTP sender before using invitations; never share administrator credentials with recipients.
 
 Deactivate a member with `update public.supplier_members set active = false where user_id = 'AUTH_UUID';`. Policies check membership on each database request, so an existing token cannot bypass this revocation.
 
@@ -42,6 +53,10 @@ Browser sign-out clears the current session even if the network is unavailable. 
 
 ## Verification
 
+All 37 local client checks passed. Live SQL checks passed for anonymous access, signed-in non-members, viewer restrictions, editor and owner permissions, membership revocation, and revision conflicts. Those checks ran in rollback-isolated transactions; temporary fixtures were removed and the supplier dataset was unchanged. A separate anonymous REST request was denied with HTTP 401. These results verify the deployed database controls; owner password setup and the final hosted browser flow remain to be completed.
+
 `node --test auth-core.test.mjs` checks the client-side session lifecycle, active membership checks, viewer restrictions, conflict handling, logout races, invitation/recovery callbacks, and password setup using controlled responses. These tests do **not** replace the live database and email-flow checks above.
+
+Maintenance notes: leaked-password protection is unavailable on the project's current Free plan; no plan upgrade was requested. See [password security options](https://supabase.com/docs/guides/auth/password-security#password-strength-and-leaked-password-protection). The provisioning-only activation-claims table intentionally has RLS enabled without public policies and no grants to `anon` or `authenticated`; its RLS-without-policy advisory reflects denied client access.
 
 Provider references: [row-level security](https://supabase.com/docs/guides/database/postgres/row-level-security), [user sessions](https://supabase.com/docs/guides/auth/sessions), [sign-out behavior](https://supabase.com/docs/guides/auth/signout), [email templates and token hashes](https://supabase.com/docs/guides/auth/auth-email-templates), [OTP verification](https://supabase.com/docs/reference/javascript/auth-verifyotp), [password updates](https://supabase.com/docs/reference/javascript/auth-updateuser), and [Auth REST endpoints](https://supabase.github.io/auth/).

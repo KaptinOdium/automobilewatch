@@ -1,10 +1,11 @@
 -- Supplier Atlas: run once in a dedicated Supabase project.
--- No user identities are embedded here. Add exactly the two verified Auth user IDs
+-- Create-only bootstrap: an existing installation causes the transaction to fail.
+-- No user identities are embedded here. Add only the explicitly authorized Auth user IDs
 -- to supplier_members after creating the accounts through an admin connection.
 
 begin;
 
-create table if not exists public.supplier_members (
+create table public.supplier_members (
   user_id uuid primary key references auth.users(id) on delete cascade,
   display_name text not null,
   role text not null default 'viewer' check (role in ('owner', 'editor', 'viewer')),
@@ -13,11 +14,10 @@ create table if not exists public.supplier_members (
 alter table public.supplier_members enable row level security;
 revoke all on public.supplier_members from public, anon, authenticated;
 grant select on public.supplier_members to authenticated;
-drop policy if exists supplier_member_self on public.supplier_members;
 create policy supplier_member_self on public.supplier_members for select to authenticated
   using (user_id = (select auth.uid()) and active);
 
-create table if not exists public.supplier_datasets (
+create table public.supplier_datasets (
   id text primary key check (id = 'main'),
   suppliers jsonb not null default '[]'::jsonb,
   revision integer not null default 0 check (revision >= 0),
@@ -31,11 +31,14 @@ insert into public.supplier_datasets(id) values ('main') on conflict (id) do not
 alter table public.supplier_datasets enable row level security;
 revoke all on public.supplier_datasets from public, anon, authenticated;
 grant select on public.supplier_datasets to authenticated;
-drop policy if exists supplier_dataset_members on public.supplier_datasets;
 create policy supplier_dataset_members on public.supplier_datasets for select to authenticated
   using (exists (select 1 from public.supplier_members m where m.user_id = (select auth.uid()) and m.active));
 
-create or replace function public.save_supplier_dataset(expected_revision integer, supplier_rows jsonb)
+create schema supplier_private;
+revoke all on schema supplier_private from public, anon;
+grant usage on schema supplier_private to authenticated;
+
+create function supplier_private.save_supplier_dataset(expected_revision integer, supplier_rows jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
   saved public.supplier_datasets;
@@ -67,6 +70,13 @@ begin
   return to_jsonb(saved);
 end;
 $$;
+revoke all on function supplier_private.save_supplier_dataset(integer, jsonb) from public, anon;
+grant execute on function supplier_private.save_supplier_dataset(integer, jsonb) to authenticated;
+
+create function public.save_supplier_dataset(expected_revision integer, supplier_rows jsonb)
+returns jsonb language sql security invoker set search_path = '' as $$
+  select supplier_private.save_supplier_dataset(expected_revision, supplier_rows);
+$$;
 revoke all on function public.save_supplier_dataset(integer, jsonb) from public, anon;
 grant execute on function public.save_supplier_dataset(integer, jsonb) to authenticated;
 
@@ -78,10 +88,10 @@ commit;
 --    https://kaptinodium.github.io/automobilewatch/suppliers/
 --    https://kaptinodium.github.io/automobilewatch/suppliers/account.html
 --    Set invitation/recovery email links as documented in setup/README.md.
--- 3. Create the two accounts using verified emails. Never put passwords or a
+-- 3. Create only the authorized accounts using verified emails. Never put passwords or a
 --    service-role key in this repository. Each user sets their own password.
 -- 4. Insert their exact Auth UUIDs into supplier_members; owner for the requester,
---    editor/viewer for Tudor according to the chosen collaboration access.
+--    editor/viewer only for optional, explicitly authorized collaborators.
 -- 5. Set only the project URL and public publishable/anon key in config.json.
 -- 6. Test anonymous denial, non-member denial, member read, editor write,
 --    viewer write denial and revision conflict on the deployed database.
