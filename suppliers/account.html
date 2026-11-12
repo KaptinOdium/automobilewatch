@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex,nofollow">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' https:; img-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <title>Set your password | Supplier Atlas</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header><a class="brand backlink" href="./">SUPPLIER ATLAS</a><a class="backlink" href="./">Return to sign in</a></header>
+  <main class="authgate">
+    <section class="authcard">
+      <p class="eyebrow">YOUR INVITED ACCOUNT</p>
+      <h1>Set your password.</h1>
+      <p class="lede">Choose a private password for your shared supplier workspace.</p>
+      <p id="accountNotice" class="authnotice" role="status" aria-live="polite">Checking your account link...</p>
+      <form id="passwordForm" hidden>
+        <label for="newPassword">New password</label>
+        <input id="newPassword" type="password" autocomplete="new-password" minlength="12" required aria-describedby="passwordHint">
+        <p id="passwordHint" class="tiny">Use at least 12 characters. A unique passphrase works well.</p>
+        <label for="confirmPassword">Confirm password</label>
+        <input id="confirmPassword" type="password" autocomplete="new-password" minlength="12" required>
+        <button id="setPasswordButton" type="submit" class="primary full">Save password</button>
+      </form>
+      <p id="nextStep" class="small" hidden><a class="backlink" href="./">Sign in to Supplier Atlas</a></p>
+      <noscript><p>Enable JavaScript to use your account link.</p></noscript>
+    </section>
+    <aside class="authart" aria-hidden="true"><div><span>SHARED WORKSPACE</span><strong>Your account.<br>Your supplier network.</strong></div></aside>
+  </main>
+  <script type="module" src="account.mjs"></script>
+</body>
+</html>

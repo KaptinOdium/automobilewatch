@@ -26,3 +26,13 @@ Hover or keyboard-focus a country dot for dates and affected groups; select it t
 
 The date timeline starts in **All dates** mode. Drag the slider, step a day, or press Play to explore a single date across the map, dated counts, list, calendar and exports. The timeline uses the current dataset's planning window and respects other filters. Published end dates are inclusive; an unknown end is not extended into future dates. A reported ongoing event with no end date can also appear on today's date. The undated watchlist remains separate. Playback pauses when the tab is hidden or a brief is opened and stops at the end of the window.
 
+
+## Supplier Atlas
+
+Supplier workspace: https://kaptinodium.github.io/automobilewatch/suppliers/
+
+The Suppliers link opens a private shared supplier-map interface inside this GitHub Pages site. CSV/TSV import and Excel paste preserve supplier names and DUNS strings; city/country matching uses the bundled GeoNames gazetteer, with coordinate review, map filters, CSV export, and explicit shared saves. City matches are approximate, not verified factory positions.
+
+**Activation is pending:** the page remains locked until the owner-controlled Supabase account service is configured. See [account setup](suppliers/setup/README.md) for the schema, invited members, public browser settings, and required live access checks. No supplier records, credentials, or private keys belong in this public repository.
+
+Run supplier checks with `node --test suppliers/*.test.mjs`. The client tests use controlled responses; they do not verify a live Supabase project.

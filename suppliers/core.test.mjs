@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {parseSuppliers,parseDelimited,csvExport,norm,point} from './core.mjs';
+const prefix='Name,DUNS,Country,City,Latitude,Longitude\n';
+const a=parseSuppliers(prefix+'"Parts, Inc",001234567,Czechia,Prague,0,0')[0];assert.equal(a.name,'Parts, Inc');assert.equal(a.duns,'001234567');assert.equal(a.lat,0);assert.equal(a.lon,0);assert.equal(a.precision,'Provided coordinates');
+const t=parseSuppliers('Dodavatel\tD-U-N-S\tZemě\tMěsto\nExample\t00-123-4567\tČesko\tPraha')[0];assert.equal(t.duns,'001234567');assert.equal(t.city,'Praha');assert.equal(t.lat,null);
+const s=parseSuppliers('Name;DUNS;Country;City;Latitude;Longitude\nA;001234567;Germany;Berlin;52,5;13,4')[0];assert.equal(s.lat,52.5);assert.equal(s.lon,13.4);
+const bad=parseSuppliers(prefix+'A,1.23E8,China,Shanghai,999,120')[0];assert.equal(bad.lat,null);assert.equal(bad.warnings.length,2);assert.equal(bad.duns,'1.23E8');
+assert.deepEqual(parseDelimited('Name,DUNS\n"Line one\nline two","00"'),[['Name','DUNS'],['Line one\nline two','00']]);assert.throws(()=>parseDelimited('a,b\n"unfinished'),/unfinished/);assert.throws(()=>parseSuppliers('Name,Country\nA,Czechia'),/Missing duns/);
+assert.equal(norm('München'),'munchen');assert.notEqual(norm('上海'),'');assert.notEqual(norm('上海'),norm('北京'));assert.deepEqual(point(0,0),{x:500,y:250});
+const output=csvExport([{...a,name:'=HYPERLINK("https://example.com")',lat:-23,lon:0}]);assert.ok(output.includes('"\'=HYPERLINK'));assert.ok(output.includes('"001234567"'));assert.ok(output.includes('"-23","0"'));
+const duplicate=parseSuppliers(prefix+'A,001234567,Czechia,Prague,,\nB,001234567,Czechia,Prague,,');assert.equal(duplicate.length,2);assert.notEqual(duplicate[0].id,duplicate[1].id);
+const leadingBlank=parseSuppliers('\uFEFF\r\n  \r\nName;DUNS;Country;City\r\nA;001234567;Germany;Berlin');assert.equal(leadingBlank[0].city,'Berlin');
+const leadingBlankTsv=parseSuppliers('\n\nName\tDUNS\tCountry\tCity\nA\t001234567\tGermany\tBerlin');assert.equal(leadingBlankTsv[0].country,'Germany');
+assert.deepEqual(parseDelimited('"A;B;C",Value\n"x;y;z",1'),[['A;B;C','Value'],['x;y;z','1']]);
+console.log('PASS: CSV/TSV parsing, multilingual headers, DUNS zeros, invalid-coordinate retention, Unicode normalization, duplicate rows, and spreadsheet-formula safety.');
