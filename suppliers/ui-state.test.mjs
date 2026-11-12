@@ -19,11 +19,20 @@ class Element {
   showModal(){this.open=true;}
   close(){this.open=false;}
 }
-async function fixture({configuredService=true,role='owner',loadFailure=false,cityPartCount=1,failedCityPart=null}={}){
+async function fixture({configuredService=true,role='owner',loadFailure=false,cityPartCount=1,failedCityPart=null,detailedMap=false,deferMap=false,teardownFailure=false}={}){
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(m=>[m[1],new Element(m[1])]));
   nodes.get('workspaceMain').hidden=true;nodes.get('loginForm').hidden=true;
   const editable=new Set([...html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*data-edit[^>]*>/g)].map(m=>nodes.get(m[1])));
   let saves=0,identity=null;
+  const mapCalls={created:0,destroyed:0,updates:[],fits:[],focused:[],options:null};
+  let completeMap;
+  const createSupplierMap=async options=>{
+    mapCalls.created++;mapCalls.options=options;
+    if(!detailedMap)throw Error('Detailed map unavailable in this fixture.');
+    const controller={update:rows=>mapCalls.updates.push(structuredClone(rows)),fit:rows=>mapCalls.fits.push(structuredClone(rows)),focus:row=>mapCalls.focused.push(row.id),destroy:()=>{mapCalls.destroyed++;if(teardownFailure)throw Error('Map teardown failed');},resize(){},world(){},europe(){},zoom(){}};
+    if(deferMap)await new Promise(resolve=>completeMap=resolve);
+    options.onReady();return controller;
+  };
   const dataset={id:'main',revision:2,suppliers:[]};
   class Auth {
     constructor(){this.session=null;}
@@ -46,11 +55,11 @@ async function fixture({configuredService=true,role='owner',loadFailure=false,ci
     if(path==='./world-map.json')return {ok:true,json:async()=>[]};
     throw Error('Unexpected fetch '+path);
   };
-  const context=vm.createContext({console,Map,Set,Intl,Number,String,Object,Array,Math,Date,URL,Blob,AbortController,AbortSignal,Promise,Error,Option:class extends Element{constructor(text,value){super();this.textContent=text;this.value=value;}},norm,parseSuppliers,csvExport,point,AccessError,ConflictError,configured,AuthClient:Auth,setIdentity:v=>identity=v,confirm:()=>true,setInterval:()=>0,setTimeout,clearTimeout,sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}},window:{addEventListener(){}},document:{visibilityState:'visible',getElementById:id=>{if(!nodes.has(id))throw Error('Missing DOM id '+id);return nodes.get(id);},querySelectorAll:()=>[...editable,...[...nodes.values()].flatMap(n=>n.children).filter(n=>n?.attrs?.['data-edit']!==undefined)],createElement:()=>new Element(),createElementNS:()=>new Element(),addEventListener(){}},fetch:fetcher});
-  vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace(/start\(\);\s*$/,'globalThis.ready=start();')+'\nglobalThis.state=()=>({rows,dirty,identity,loaded,view});',context);
+  const context=vm.createContext({console,Map,Set,Intl,Number,String,Object,Array,Math,Date,URL,Blob,AbortController,AbortSignal,Promise,Error,Option:class extends Element{constructor(text,value){super();this.textContent=text;this.value=value;}},norm,parseSuppliers,csvExport,point,AccessError,ConflictError,configured,AuthClient:Auth,createSupplierMap,setIdentity:v=>identity=v,confirm:()=>true,setInterval:()=>0,setTimeout,clearTimeout,sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}},window:{addEventListener(){}},document:{visibilityState:'visible',getElementById:id=>{if(!nodes.has(id))throw Error('Missing DOM id '+id);return nodes.get(id);},querySelectorAll:()=>[...editable,...[...nodes.values()].flatMap(n=>n.children).filter(n=>n?.attrs?.['data-edit']!==undefined)],createElement:()=>new Element(),createElementNS:()=>new Element(),addEventListener(){}},fetch:fetcher});
+  vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace(/start\(\);\s*$/,'globalThis.ready=start();')+'\nglobalThis.state=()=>({rows,dirty,identity,loaded,view,detailReady});',context);
   await context.ready;
   const login=async password=>{nodes.get('loginEmail').value='member@example.com';nodes.get('loginPassword').value=password;await nodes.get('loginForm').onsubmit({preventDefault(){}});};
-  return {nodes,context,login,saves:()=>saves,identity:()=>identity,cityRequests:()=>totalCityRequests,maxCityRequests:()=>maxCityRequests};
+  return {nodes,context,login,mapCalls,completeMap:()=>completeMap?.(),saves:()=>saves,identity:()=>identity,cityRequests:()=>totalCityRequests,maxCityRequests:()=>maxCityRequests};
 }
 test('unconfigured deployment stays locked and does not offer a pretend login',async()=>{const f=await fixture({configuredService:false});assert.equal(f.nodes.get('workspaceMain').hidden,true);assert.equal(f.nodes.get('loginForm').hidden,true);assert.match(f.nodes.get('authNotice').textContent,/setup is not finished/i);assert.equal(f.context.state().rows.length,0);});
 test('failed login stays locked and clears password',async()=>{const f=await fixture();await f.login('wrong');assert.equal(f.nodes.get('workspaceMain').hidden,true);assert.equal(f.nodes.get('loginPassword').value,'');assert.equal(f.identity(),null);});
@@ -63,3 +72,26 @@ test('correcting an invalid location clears only the resolved coordinate warning
 
 test('city shards load only after login, with at most four requests active',async()=>{const f=await fixture({cityPartCount:9});assert.equal(f.cityRequests(),0);await f.login('valid-password');assert.equal(f.cityRequests(),9);assert.equal(f.maxCityRequests(),4);await f.nodes.get('logoutButton').onclick();await f.login('valid-password');assert.equal(f.cityRequests(),9);});
 test('missing city shard disables offline matches while imported coordinates remain usable',async()=>{const f=await fixture({cityPartCount:5,failedCityPart:'part-002.json'});await f.login('valid-password');f.nodes.get('pasteInput').value='Name,DUNS,Country,City,Latitude,Longitude\nNeeds lookup,001234567,Czechia,Praha,,\nProvided,001234568,Czechia,Praha,50,14';f.nodes.get('importButton').onclick();assert.equal(f.context.state().rows[0].lat,null);assert.equal(f.context.state().rows[1].lat,50);assert.equal(f.context.state().loaded,true);});
+
+
+test('detailed maps initialize only after successful login and receive the filtered list',async()=>{
+ const f=await fixture({detailedMap:true});assert.equal(f.mapCalls.created,0);
+ await f.login('wrong');assert.equal(f.mapCalls.created,0);
+ await f.login('valid-password');assert.equal(f.mapCalls.created,1);assert.equal(f.context.state().detailReady,true);
+ f.nodes.get('pasteInput').value='Name,DUNS,Country,City,Latitude,Longitude\nSupplier A,001234567,Czechia,Prague,50,14\nSupplier B,001234568,Germany,Berlin,52,13';f.nodes.get('importButton').onclick();
+ assert.equal(f.mapCalls.updates.at(-1).length,2);
+ f.nodes.get('search').value='Supplier B';f.nodes.get('search').listeners.input();
+ assert.equal(f.mapCalls.updates.at(-1).length,1);assert.equal(f.mapCalls.updates.at(-1)[0].name,'Supplier B');
+ await f.nodes.get('logoutButton').onclick();assert.equal(f.mapCalls.destroyed,1);assert.equal(f.context.state().detailReady,false);assert.equal(f.nodes.get('map').hidden,false);
+});
+test('signing out during map startup discards the late map and keeps private details cleared',async()=>{
+ const f=await fixture({detailedMap:true,deferMap:true});await f.login('valid-password');
+ await f.nodes.get('logoutButton').onclick();f.completeMap();await new Promise(resolve=>setTimeout(resolve,0));
+ assert.equal(f.mapCalls.destroyed,1);assert.equal(f.mapCalls.updates.length,0);assert.equal(f.context.state().detailReady,false);assert.equal(f.nodes.get('mapPopup').hidden,true);
+});
+test('a detailed-map failure leaves the basic map and working supplier list available',async()=>{
+ const f=await fixture();await f.login('valid-password');
+ assert.equal(f.context.state().detailReady,false);assert.equal(f.nodes.get('map').hidden,false);assert.match(f.nodes.get('mapStatus').textContent,/basic world map/);assert.equal(f.context.state().loaded,true);
+});
+
+test('sign-out still clears private data if map teardown fails',async()=>{const f=await fixture({detailedMap:true,teardownFailure:true});await f.login('valid-password');f.nodes.get('pasteInput').value='Name,DUNS,Country,City\nPrivate Supplier,001234567,Czechia,Praha';f.nodes.get('importButton').onclick();await f.nodes.get('logoutButton').onclick();assert.equal(f.context.state().rows.length,0);assert.equal(f.identity(),null);assert.equal(f.nodes.get('workspaceMain').hidden,true);assert.equal(f.nodes.get('mapPopup').hidden,true);});
