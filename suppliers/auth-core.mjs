@@ -232,6 +232,25 @@ export class AuthClient {
     return data[0];
   }
 
+  async loadScreeningRegister() {
+    const generation = this.generation;
+    const member = await this.verify();
+    this.assertCurrent(generation);
+    if (member.role !== 'owner') return null;
+
+    const token = await this.token();
+    this.assertCurrent(generation);
+    const data = await this.request('/rest/v1/supplier_screening_registers?select=register&owner_id=eq.' +
+      encodeURIComponent(member.id) + '&limit=1', { token });
+    this.assertCurrent(generation);
+    if (Array.isArray(data) && data.length === 0) return null;
+    const register = Array.isArray(data) && data.length === 1 ? data[0]?.register : null;
+    if (!register || typeof register !== 'object' || Array.isArray(register)) {
+      throw new Error('The screening register could not be read.');
+    }
+    return register;
+  }
+
   async saveShared(rows, revision) {
     if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('Load the current shared list before saving.');
     if (!Array.isArray(rows) || rows.length > 10000 || rows.some(row => !row || typeof row !== 'object' || Array.isArray(row))) {
