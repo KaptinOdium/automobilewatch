@@ -81,14 +81,14 @@ test('city shards load only after login, with at most four requests active',asyn
 test('missing city shard disables offline matches while imported coordinates remain usable',async()=>{const f=await fixture({cityPartCount:5,failedCityPart:'part-002.json'});await f.login('valid-password');f.nodes.get('pasteInput').value='Name,DUNS,Country,City,Latitude,Longitude\nNeeds lookup,001234567,Czechia,Praha,,\nProvided,001234568,Czechia,Praha,50,14';f.nodes.get('importButton').onclick();assert.equal(f.context.state().rows[0].lat,null);assert.equal(f.context.state().rows[1].lat,50);assert.equal(f.context.state().loaded,true);});
 
 
-test('detailed maps initialize only after successful login and receive the filtered list',async()=>{
+test('detailed maps initialize only after successful login and keep all sites when the register is filtered',async()=>{
  const f=await fixture({detailedMap:true});assert.equal(f.mapCalls.created,0);
  await f.login('wrong');assert.equal(f.mapCalls.created,0);
  await f.login('valid-password');assert.equal(f.mapCalls.created,1);assert.equal(f.context.state().detailReady,true);
  f.nodes.get('pasteInput').value='Name,DUNS,Country,City,Latitude,Longitude\nSupplier A,001234567,Czechia,Prague,50,14\nSupplier B,001234568,Germany,Berlin,52,13';f.nodes.get('importButton').onclick();
  assert.equal(f.mapCalls.updates.at(-1).length,2);
  f.nodes.get('search').value='Supplier B';f.nodes.get('search').listeners.input();
- assert.equal(f.mapCalls.updates.at(-1).length,1);assert.equal(f.mapCalls.updates.at(-1)[0].name,'Supplier B');
+ assert.deepEqual(f.mapCalls.updates.at(-1).map(row=>row.name),['Supplier A','Supplier B']);assert.equal(f.nodes.get('tableBody').children.length,1);
  await f.nodes.get('logoutButton').onclick();assert.equal(f.mapCalls.destroyed,1);assert.equal(f.context.state().detailReady,false);assert.equal(f.nodes.get('map').hidden,false);
 });
 test('signing out during map startup discards the late map and keeps private details cleared',async()=>{
@@ -102,51 +102,72 @@ test('a detailed-map failure leaves the basic map and working supplier list avai
 });
 
 test('sign-out still clears private data if map teardown fails',async()=>{const f=await fixture({detailedMap:true,teardownFailure:true});await f.login('valid-password');f.nodes.get('pasteInput').value='Name,DUNS,Country,City\nPrivate Supplier,001234567,Czechia,Praha';f.nodes.get('importButton').onclick();await f.nodes.get('logoutButton').onclick();assert.equal(f.context.state().rows.length,0);assert.equal(f.identity(),null);assert.equal(f.nodes.get('workspaceMain').hidden,true);assert.equal(f.nodes.get('mapPopup').hidden,true);});
-const supplierRow = (id,name) => ({id,name,duns:'010234567',city:'Brno',country:'Czechia',warnings:[]});
-const registerFor = (company, title='Reviewed factory action') => ({
-  ...emptyCalendar,
-  events:[{id:'action',title,company,country:'Czechia',site:'Brno',scope:'named-site',state:'risk',category:'risk',
-    screening:{decision:'watch',reason:'Await a dated strike call.'},lastChecked:'2026-11-17',
-    sources:[{name:'Employer statement',published:'2026-11-16',url:'https://example.org/notice'}]}],
-  screeningRules:{summary:'Verify the named site.'}, coverageNote:'Trade union and employer registers checked.'
+const supplierRow = (id,name) => ({id,name,duns:'01023456'+id.slice(-1),city:'Brno',country:'Czechia',warnings:[],lat:49,lon:16});
+const today = new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Prague',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+const registerFor = (company,title='Reviewed factory action',active=false) => ({
+  ...emptyCalendar, asOf:today,
+  events:[{id:'action',title,company,country:'Czechia',site:'Brno',scope:'named-site',
+    state:active?'ongoing':'risk',category:active?'strike':'risk',date:active?today:undefined,relevance:'supplier',
+    screening:{decision:active?'candidate':'watch',reason:active?'Confirmed strike at the plant.':'Await a dated strike call.'},
+    lastChecked:today,sources:[{name:'Employer statement',published:today,url:'https://example.org/notice'}]}],
+  screeningRules:{summary:'Verify the named site.'},coverageNote:'Trade union and employer registers checked.'
 });
 const nodeText = el => [el.textContent,...el.children.map(nodeText)].join(' ');
+const descendants = el => [el,...el.children.flatMap(descendants)];
 const settled = () => new Promise(resolve=>setTimeout(resolve,0));
+const findings = f => f.nodes.get('screeningResults');
+function openEvidence(f) {
+  for(const detail of descendants(findings(f)).filter(n=>n.className==='scan-evidence')) {
+    detail.open=true;detail.listeners.toggle();
+  }
+  return nodeText(findings(f));
+}
 
-test('screening uses all authorized suppliers while table filters are active and reuses sourced upstream decisions',async()=>{
-  const calendar=registerFor('Example Automotive');
-  const requests=[];
-  const f=await fixture({sharedRows:[supplierRow('s1','Example Automotive GmbH'),supplierRow('s2','Elsewhere AG')],
-    screeningLoad:async(...args)=>{requests.push(args);return {calendar,coverage:'Saved fallback'};},
-    projectLoad:async()=>registerFor('Elsewhere','Separate project action')});
+test('one action scans the entire list, groups overlapping source evidence and updates the unfiltered map',async()=>{
+  const requests=[],hazardRequests=[];
+  const rows=[supplierRow('s1','Example Automotive GmbH'),supplierRow('s2','Elsewhere AG')];
+  const calendar=registerFor('Example Automotive','Union reports an active plant stoppage',true);
+  const f=await fixture({sharedRows:rows,detailedMap:true,
+    screeningLoad:async(...args)=>{requests.push(args);return {calendar,coverage:'Live calendar'};},
+    projectLoad:async()=>registerFor('Elsewhere','Project watch'),
+    hazardLoad:async(list,options)=>{hazardRequests.push([list.length,options.force]);return {
+      coverage:'Live sample',checkedAt:today,matches:[{supplier:list[0],event:calendar.events[0],decision:'unreviewed',kind:'locality',basis:'City only',reason:'Local hazard lead.'}]};}
+  });
   assert.equal(requests.length,0);
   await f.login('valid-password');await settled();
   f.nodes.get('search').value='Elsewhere';f.nodes.get('search').listeners.input();
   await f.nodes.get('refreshScreening').onclick();
-  const publicResult=nodeText(f.nodes.get('publicMatches'));
-  for(const detail of ['1 of 2','Example Automotive GmbH','Watch / reconfirm','Await a dated strike call.','Employer statement','2026-11-17','Saved fallback','Verify the named site.']) assert.ok(publicResult.includes(detail),detail);
-  assert.match(nodeText(f.nodes.get('projectMatches')),/Separate project action/);
-  assert.ok(requests.every(args=>args.length===0),'network calendar loader never receives supplier rows');
+  assert.deepEqual(hazardRequests,[[2,false],[2,true]]);
+  assert.ok(requests.every(args=>args.length===0));
+  assert.match(f.nodes.get('scanStatus').textContent,/2 suppliers scanned.*1 red.*1 yellow/);
+  assert.deepEqual(descendants(findings(f)).filter(n=>n.className==='scan-dot').map(n=>n.attrs['data-level']),['red','yellow']);
+  const details=openEvidence(f);
+  for(const expected of ['Example Automotive GmbH','Elsewhere AG','Active site incident','Needs review','Union reports','Project watch','Employer statement','Global Incident Tracker','Local hazard lead.']) assert.ok(details.includes(expected),expected);
+  assert.deepEqual(f.mapCalls.updates.at(-1).map(r=>r.screeningLevel),['red','yellow']);
+  assert.ok(!f.context.state().rows.some(r=>Object.hasOwn(r,'screeningLevel')),'scan indicators are transient');
+  assert.doesNotMatch(html,/id="checkTracker"/);
   f.nodes.get('pasteInput').value='Name,DUNS,Country,City\nNew Supplier,001234567,Czechia,Brno';
   f.nodes.get('importButton').onclick();await settled();
-  assert.match(nodeText(f.nodes.get('publicMatches')),/0 of 1/);
-  assert.doesNotMatch(nodeText(f.nodes.get('publicMatches')),/Example Automotive/);
+  assert.doesNotMatch(nodeText(findings(f)),/Example Automotive|Elsewhere/);
 });
-test('private register works during public failure and removal clears the local result',async()=>{
+
+test('partial or unavailable sources remain explicit and a local file can supply independent evidence',async()=>{
   const f=await fixture({sharedRows:[supplierRow('s1','Private Supplier')],
-    screeningLoad:async()=>{throw Error('Connection unavailable.');},projectLoad:async()=>{throw Error('Unavailable.');}});
+    screeningLoad:async()=>{throw Error('Calendar connection unavailable.');},projectLoad:async()=>{throw Error('Register unavailable.');}});
   await f.login('valid-password');await settled();
-  assert.match(nodeText(f.nodes.get('publicMatches')),/unavailable/i);
-  assert.match(nodeText(f.nodes.get('projectMatches')),/unavailable/i);
-  const input=f.nodes.get('privateRegister');
+  assert.match(f.nodes.get('scanStatus').textContent,/unavailable/i);
+  assert.match(f.nodes.get('scanCoverage').textContent,/unavailable/i);
+  assert.doesNotMatch(nodeText(findings(f)),/no supplier signals/i);
   const file={name:'register.json',size:500,text:async()=>JSON.stringify(registerFor('Private Supplier','Private observation'))};
-  await input.onchange({target:{files:[file]}});
-  assert.match(nodeText(f.nodes.get('privateMatches')),/Private observation/);
+  await f.nodes.get('privateRegister').onchange({target:{files:[file]}});
+  assert.match(openEvidence(f),/Private observation/);
   assert.equal(f.nodes.get('removeRegister').hidden,false);
-  f.nodes.get('removeRegister').onclick();assert.equal(nodeText(f.nodes.get('privateMatches')).trim(),'');
+  f.nodes.get('removeRegister').onclick();
+  assert.doesNotMatch(nodeText(findings(f)),/Private observation|Private Supplier/);
   assert.equal(f.nodes.get('removeRegister').hidden,true);
 });
-test('signout invalidates delayed public, owner register and local file results',async()=>{
+
+test('signout discards delayed source and file responses without restoring signals',async()=>{
   let publicDone,projectDone,fileDone;
   const f=await fixture({sharedRows:[supplierRow('s1','Private Supplier')],
     screeningLoad:()=>new Promise(r=>publicDone=r),projectLoad:()=>new Promise(r=>projectDone=r)});
@@ -157,82 +178,46 @@ test('signout invalidates delayed public, owner register and local file results'
   const calendar=registerFor('Private Supplier');
   publicDone({calendar,coverage:'Live calendar'});projectDone(calendar);fileDone(JSON.stringify(calendar));
   await uploading;await settled();
-  for(const id of ['publicMatches','privateMatches','projectMatches','registerStatus']) assert.equal(nodeText(f.nodes.get(id)).trim(),'');
+  for(const id of ['screeningResults','screeningSources','scanStatus','scanCoverage','registerStatus']) assert.equal(nodeText(f.nodes.get(id)).trim(),'');
   assert.equal(f.nodes.get('refreshScreening').disabled,true);
 });
-test('viewer can screen the authorized list without requesting the owner project register',async()=>{
-  let projectRequests=0;
-  const calendar=registerFor('Example Automotive');
+
+test('viewers scan their authorized list without requesting private owner sources',async()=>{
+  let ownerRequests=0;
   const f=await fixture({role:'viewer',sharedRows:[supplierRow('s1','Example Automotive')],
-    screeningLoad:async()=>({calendar,coverage:'Live calendar'}),projectLoad:()=>{projectRequests++;return calendar;}});
+    screeningLoad:async()=>({calendar:registerFor('Example Automotive'),coverage:'Live calendar'}),
+    projectLoad:()=>{ownerRequests++;},hazardLoad:()=>{ownerRequests++;}});
   await f.login('valid-password');await settled();
-  assert.match(nodeText(f.nodes.get('publicMatches')),/1 of 1/);
-  assert.equal(projectRequests,0);
+  assert.match(f.nodes.get('scanStatus').textContent,/1 yellow/); assert.equal(ownerRequests,0);
+  assert.doesNotMatch(nodeText(f.nodes.get('screeningSources')),/Project register|Global Incident Tracker/);
 });
-test('owner screening automatically checks live discovery and manual recheck can force a fresh read',async()=>{
-  const requests=[];
-  const f=await fixture({sharedRows:[supplierRow('s1','Supplier')],hazardLoad:async(list,options)=>{
-    requests.push(options.force);
-    if(options.force)throw Error('Tracker did not respond.');
-    return {coverage:'Latest public incident sample; six-hour window',recordCount:25,consideredCount:4,
-      matches:[],checkedAt:'2026-11-18T06:00:00Z',sourceURL:'https://example.org/'};
-  }});
-  await f.login('valid-password');await settled();
-  assert.deepEqual(requests,[false]);
-  await f.nodes.get('refreshScreening').onclick();
-  assert.deepEqual(requests,[false,false]);
-  const text=nodeText(f.nodes.get('trackerResults'));
-  for(const detail of ['six-hour window','25','4','Supplier leads · 0','06:00:00Z'])assert.ok(text.includes(detail),detail);
-  await f.nodes.get('checkTracker').onclick();
-  assert.deepEqual(requests,[false,false,true]);
-  assert.match(nodeText(f.nodes.get('trackerResults')),/unavailable/i);
-  assert.doesNotMatch(nodeText(f.nodes.get('trackerResults')),/Supplier leads · 0/);
-});
-test('membership downgrade clears owner findings and discards in-flight discovery results',async()=>{
+
+test('membership downgrade discards the old scan and clears confidential results',async()=>{
   let finish;
   const f=await fixture({sharedRows:[supplierRow('s1','Private Supplier')],
     projectLoad:async()=>registerFor('Private Supplier','Restricted internal finding'),
     hazardLoad:()=>new Promise(resolve=>finish=resolve)});
   await f.login('valid-password');await settled();
-  assert.match(nodeText(f.nodes.get('projectMatches')),/Restricted internal finding/);
   f.setRole('viewer');await f.context.recheck();await settled();
-  finish({matches:[],recordCount:10,consideredCount:2,coverage:'Private scan'});
-  await settled();
-  assert.equal(f.nodes.get('trackerPanel').hidden,true);
-  assert.equal(nodeText(f.nodes.get('trackerResults')).trim(),'');
-  assert.equal(nodeText(f.nodes.get('projectMatches')).trim(),'');
+  finish({matches:[],recordCount:10,consideredCount:2,coverage:'Private scan'});await settled();
+  assert.doesNotMatch(nodeText(f.nodes.get('screeningSources')),/Project register|Private scan/);
+  assert.doesNotMatch(nodeText(findings(f)),/Restricted internal finding/);
 });
-test('project rules retain nested categories and operational review leads are distinct from site matches',async()=>{
-  const calendar=registerFor('Example Automotive');
-  const primary=calendar.events[0];
-  calendar.events.push({...primary,id:'group',site:'',scope:'company and regional workplaces',title:'Bargaining across locations'});
-  calendar.screeningRules={summary:'Named facility check.',thresholds:{naturalHazards:['Verify road and power disruptions.']}};
-  const f=await fixture({sharedRows:[supplierRow('s1','Example Automotive')],projectLoad:async()=>calendar});
-  await f.login('valid-password');await settled();
-  const output=nodeText(f.nodes.get('projectMatches'));
-  for(const detail of ['Company and city match (1)','Company only · site unverified (1)','natural Hazards','Verify road and power disruptions.'])assert.ok(output.includes(detail),detail);
-});
-test('late project policy annotates public, owner and tracker results while keeping each original decision',async()=>{
+
+test('owner policy, source provenance, and individual provider decisions remain available after grouping',async()=>{
   let finishProject;
-  const calendar=registerFor('Example Automotive');
-  const project={...calendar,assessmentPolicy:{version:'rules v2'},
+  const calendar=registerFor('Example Automotive','Public finding');
+  const project={...registerFor('Example Automotive','Private finding'),assessmentPolicy:{version:'rules v2'},
+    screeningRules:{thresholds:{naturalHazards:['Verify roads and power.']}},
     sourceRegistry:[{name:'Private alerting system',role:'Discovery',checkStatus:'Manual review only'}]};
-  const f=await fixture({sharedRows:[supplierRow('s1','Example Automotive')],
-    projectLoad:()=>new Promise(resolve=>finishProject=resolve),
-    screeningLoad:async()=>({calendar,coverage:'Live calendar'}),
-    assess:(match,policy)=>policy.version+' / '+match.decision,
-    hazardLoad:async list=>({coverage:'Live tracker sample',recordCount:1,consideredCount:1,checkedAt:'2026-11-18T10:00:00Z',
+  const f=await fixture({sharedRows:[supplierRow('s1','Example Automotive')],projectLoad:()=>new Promise(r=>finishProject=r),
+    screeningLoad:async()=>({calendar,coverage:'Live calendar'}),assess:(match,policy)=>policy.version+' / '+match.decision,
+    hazardLoad:async list=>({coverage:'Live tracker sample',checkedAt:today,
       matches:[{supplier:list[0],event:calendar.events[0],decision:'unreviewed',kind:'locality',basis:'City only',reason:'Check facilities.'}]})});
-  await f.login('valid-password');await settled();
-  finishProject(project);await settled();
-  for(const id of ['publicMatches','projectMatches']){
-    const output=nodeText(f.nodes.get(id));
-    assert.match(output,/Watch \/ reconfirm/);
-    assert.match(output,/Project assessment · rules v2 \/ watch/);
-  }
-  const tracker=nodeText(f.nodes.get('trackerResults'));
-  assert.match(tracker,/Screening pending/);
-  assert.match(tracker,/Project assessment · rules v2 \/ unreviewed/);
-  const own=nodeText(f.nodes.get('projectMatches'));
-  for(const detail of ['Private alerting system','Discovery','Manual review only'])assert.ok(own.includes(detail),detail);
+  await f.login('valid-password');await settled();finishProject(project);await settled();
+  assert.equal(descendants(findings(f)).filter(n=>n.className==='scan-evidence').length,1);
+  const evidence=openEvidence(f);
+  for(const expected of ['Public finding','Private finding','Watch / reconfirm','rules v2 / watch','rules v2 / unreviewed','Screening pending'])assert.ok(evidence.includes(expected),expected);
+  const coverage=nodeText(f.nodes.get('screeningSources'));
+  for(const expected of ['Verify roads and power.','Private alerting system','Discovery','Manual review only'])assert.ok(coverage.includes(expected),expected);
 });
