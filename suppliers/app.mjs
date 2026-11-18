@@ -1,18 +1,23 @@
 import {norm,parseSuppliers,csvExport,point} from './core.mjs';
 import {AuthClient,configured,AccessError,ConflictError} from './auth-core.mjs?v=20261118-1';
 import {setIdentity} from './auth-state.mjs';
-import {createSupplierMap} from './map-view.mjs?v=20261112-3';
+import {createSupplierMap} from './map-view.mjs?v=20261118-2';
 const $=id=>document.getElementById(id),NS='http://www.w3.org/2000/svg';let lastLookupAt=0;let rows=[],world=[],cities=[],cityIndex=new Map(),countryIndex=new Map(),cache=new Map(),selected=null,busy=false,cancel=false,view=[0,0,1000,500];
 let auth=null,identity=null,revision=0,dirty=false,saving=false,loading=false,loaded=false,epoch=0,checking=false,lookupAbort=null;
 let detailMap=null,detailReady=false,mapAttempt=0,mapAbort=null;
-import {createScreeningPanel} from './screening-panel.mjs';
+import {createScreeningPanel} from './screening-panel.mjs?v=20261118-2';
 import {loadCalendar,readPrivateRegister} from './screen-calendar.mjs';
 import {loadHazardLeads} from './screen-hazards.mjs';
 import {projectAssessment} from './screen-policy.mjs';
-import {matchSuppliers} from './screen-matches.mjs';
+import {matchSuppliers} from './screen-matches.mjs?v=20261118-2';
+let signalsById = new Map();
+const signalColors = {red:'#c53735', yellow:'#f5c542', neutral:'#64748b'};
+const signalLabels = {red:'Active site incident', yellow:'Needs review', neutral:'Other supplier'};
+const levelOrder = {red:2, yellow:1, neutral:0};
 const screeningPanel = createScreeningPanel({
   document, core:window.StrikeCore, loadCalendar, readPrivateRegister, matchSuppliers, countryCode:getCode,
   loadHazardLeads, projectAssessment, canCheckTracker: () => identity?.role === 'owner',
+  onSignals: updateSignals, onShowMap: focusSupplier,
   loadProject: () => identity?.role === 'owner' ? auth.loadScreeningRegister() : null
 });
 const canEdit=()=>identity&&['owner','editor'].includes(identity.role);
@@ -43,12 +48,98 @@ function filtered(){const q=norm($('search').value),country=$('countryFilter').v
 function render(){const mapped=rows.filter(hasPoint);$('countAll').textContent=rows.length.toLocaleString();$('countMapped').textContent=mapped.length.toLocaleString();$('countCountries').textContent=new Set(rows.map(r=>getCode(r.country)||norm(r.country)).filter(Boolean)).size;$('countReview').textContent=rows.length-mapped.length;const old=$('countryFilter').value;$('countryFilter').replaceChildren(new Option('All countries',''));[...new Set(rows.map(r=>r.country).filter(Boolean))].sort().forEach(c=>$('countryFilter').add(new Option(c,c)));$('countryFilter').value=old;$('mapTitle').textContent='Supplier locations';$('emptyMap').hidden=rows.length>0;renderTable();renderDots();}
 function renderTable(){const list=filtered(),body=$('tableBody');body.replaceChildren();$('emptyTable').hidden=list.length>0;$('emptyTable').textContent=rows.length?'No suppliers match the current filters.':'Your imported suppliers will appear here.';for(const r of list.slice(0,1000)){const tr=el('tr'),a=el('td');a.append(el('b',r.name||'Unnamed supplier'),el('small',r.duns||'No DUNS'));const b=el('td',r.city||'No city');b.append(el('small',r.country||'No country'));const c=el('td');c.append(el('span',r.precision,'badge '+(hasPoint(r)?r.precision==='Approximate city'?'':'blue':'warn')));if(hasPoint(r))c.append(el('small',`${r.lat.toFixed(4)}, ${r.lon.toFixed(4)}`));const d=el('td');d.append(el('small',r.warnings.length?r.warnings.join(' · '):hasPoint(r)?r.source:'Location not resolved'));const e=el('td'),btn=el('button','Review','quiet');if(hasPoint(r)){const show=el('button','Show on map','quiet smallbtn');show.onclick=()=>focusSupplier(r);e.append(show);} btn.setAttribute('data-edit','');btn.disabled=!canEdit()||saving||loading||busy||!loaded;btn.onclick=()=>edit(r.id);e.append(btn);tr.append(a,b,c,d,e);body.append(tr);}$('rowCount').textContent=`${list.length.toLocaleString()} ${list.length===1?'row':'rows'}${list.length>1000?' · first 1,000 shown; export contains all filtered rows':''}`;}
 function svg(tag,attrs){const e=document.createElementNS(NS,tag);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);return e;}
-function renderDots(){detailMap?.update(filtered());const dots=$('dots');dots.replaceChildren();const group=new Map(),scale=view[2]/1000;for(const r of filtered().filter(hasPoint)){const p=point(r.lat,r.lon),key=Math.round(p.x/(12*scale))+','+Math.round(p.y/(12*scale));if(!group.has(key))group.set(key,[]);group.get(key).push({...r,p});}for(const members of group.values()){const x=members.reduce((a,r)=>a+r.p.x,0)/members.length,y=members.reduce((a,r)=>a+r.p.y,0)/members.length,g=svg('g',{transform:`translate(${x} ${y})`,'tabindex':0,'role':'button','aria-label':members.length>1?`${members.length} suppliers near ${members[0].city}`:`${members[0].name}, ${members[0].city}`});const circle=svg('circle',{r:(members.length>1?10:5.5)*scale,fill:members.length>1?'#112d42':members[0].precision==='Approximate city'?'#007e80':'#365acf'});g.append(circle);if(members.length>1){const t=svg('text',{x:0,y:0,style:`font-size:${10*scale}px`});t.textContent=members.length;g.append(t);}g.onclick=e=>{e.stopPropagation();popup(members);};g.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();popup(members);}};dots.append(g);}}
+function updateSignals(groups) {
+  if (groups.length === signalsById.size &&
+      groups.every(group => signalsById.get(group.supplier.id) === group.level)) return;
+  signalsById = new Map(groups.map(group => [group.supplier.id, group.level]));
+  $('mapPopup').hidden = true;
+  renderDots();
+}
+function mapDisplayRows() {
+  return rows.map(row => signalsById.has(row.id) ? {...row, screeningLevel:signalsById.get(row.id)} : row);
+}
+if (typeof ResizeObserver === 'function') {
+  new ResizeObserver(() => { if (!detailReady && identity && rows.length) renderDots(); }).observe($('mapwrap'));
+}
+function renderDots() {
+  const displayRows = mapDisplayRows();
+  detailMap?.update(displayRows);
+  const dots = $('dots');
+  dots.replaceChildren();
+  if (detailReady) return;
+  const groups = new Map();
+  const rect = $('map').getBoundingClientRect();
+  const scale = rect.width && rect.height ? Math.max(view[2]/rect.width, view[3]/rect.height) : view[2]/1000;
+  for (const row of displayRows.filter(hasPoint)) {
+    const p = point(row.lat,row.lon);
+    const key = Math.round(p.x / (18 * scale)) + ',' + Math.round(p.y / (18 * scale));
+    if (!groups.has(key)) groups.set(key, {members:[], x:0, y:0, level:'neutral'});
+    const group = groups.get(key), level = row.screeningLevel || 'neutral';
+    group.members.push(row);
+    group.x += p.x; group.y += p.y;
+    if (levelOrder[level] > levelOrder[group.level]) group.level = level;
+  }
+  // Draw flagged clusters last so nearby neutral markers cannot cover them.
+  const sorted = [...groups.values()].sort((a,b) => levelOrder[a.level] - levelOrder[b.level]);
+  for (const {members,x,y,level} of sorted) {
+    const count = members.length;
+    const label = count === 1 ? members[0].name + ', ' + members[0].city :
+      count + ' suppliers near ' + members[0].city;
+    const pin = svg('g', {transform:'translate('+x/count+' '+y/count+')', tabindex:0, role:'button',
+      'aria-label':label+' · '+signalLabels[level]});
+    pin.append(svg('circle',{r:(count > 1 ? 10 : level === 'neutral' ? 4.5 : 6.5)*scale,
+      fill:signalColors[level],stroke:level === 'yellow' ? '#705617' : '#fff','stroke-width':1.4*scale}));
+    if (count > 1) {
+      const number = svg('text',{x:0,y:0,style:'font-size:'+10*scale+'px;fill:'+(level === 'yellow' ? '#211a08' : '#fff')});
+      number.textContent = count;
+      pin.append(number);
+    }
+    pin.append(svg('circle',{r:12*scale,fill:'transparent'}));
+    pin.onclick = event => { event.stopPropagation(); popup(members); };
+    pin.onkeydown = event => { if (['Enter',' '].includes(event.key)) { event.preventDefault(); popup(members); } };
+    dots.append(pin);
+  }
+}
 function focusSupplier(row){if(detailReady&&detailMap)detailMap.focus(row);else{const p=point(row.lat,row.lon);setView([p.x-22.5,p.y-11.25,45,22.5]);}popup([row]);$('mapwrap').scrollIntoView?.({behavior:'smooth',block:'center'});}
-function popup(members){const p=$('mapPopup');p.replaceChildren();const close=el('button','×','close');close.setAttribute('aria-label','Close supplier details');close.onclick=()=>p.hidden=true;p.append(close,el('b',members.length>1?`${members.length} suppliers`:members[0].name));for(const r of members.slice(0,30)){const item=el('div');item.style.marginTop='10px';item.append(el('b',r.name),el('div',`${r.city}, ${r.country}`),el('small',`DUNS ${r.duns} · ${r.precision}`));const btn=el('button','Review','quiet');btn.setAttribute('data-edit','');btn.disabled=!canEdit()||saving||loading||busy||!loaded;btn.onclick=()=>edit(r.id);item.append(el('br'),btn);p.append(item);}if(members.length>30)p.append(el('p',`${members.length-30} more suppliers. Use the register to review all rows.`));p.hidden=false;}
+function popup(members) {
+  const box = $('mapPopup');
+  box.replaceChildren();
+  const close = el('button','×','close');
+  close.setAttribute('aria-label','Close');
+  close.onclick = () => { box.hidden = true; };
+  box.append(close);
+  if (members.length > 1) box.append(el('b',members.length+' suppliers'));
+  const level = row => signalsById.get(row.id) || 'neutral';
+  const ordered = [...members].sort((a,b) => levelOrder[level(b)] - levelOrder[level(a)]);
+  for (const row of ordered.slice(0,30)) {
+    const item = el('div');
+    item.style.marginTop = '10px';
+    item.append(el('b',row.name),el('div',[row.city,row.country].filter(Boolean).join(', ')),el('small','DUNS '+row.duns));
+    if (signalsById.has(row.id)) {
+      const status = el('div'), dot = el('i',undefined,'dot signal-'+level(row));
+      dot.setAttribute('aria-hidden','true');
+      status.append(dot,el('span',' '+signalLabels[level(row)]));
+      const evidence = el('button','View screening evidence','textbutton');
+      evidence.onclick = () => { if (screeningPanel.showSupplier(row.id)) box.hidden = true; };
+      item.append(status,evidence);
+    } else {
+      item.append(el('small',row.precision));
+    }
+    if (canEdit()) {
+      const editSite = el('button','Review location','textbutton');
+      editSite.setAttribute('data-edit','');
+      editSite.disabled = saving || loading || busy || !loaded;
+      editSite.onclick = () => edit(row.id);
+      item.append(el('br'),editSite);
+    }
+    box.append(item);
+  }
+  if (members.length > 30) box.append(el('p',(members.length-30)+' more suppliers. Open the register to see all rows.'));
+  box.hidden = false;
+}
 function setView(v){view=v;$('map').setAttribute('viewBox',v.join(' '));renderDots();}
 function zoom(f){if(detailReady&&detailMap)return detailMap.zoom(f);const w=Math.min(1500,Math.max(10,view[2]*f)),h=w/2;setView([view[0]+(view[2]-w)/2,view[1]+(view[3]-h)/2,w,h]);}
-function fit(){if(detailReady&&detailMap)return detailMap.fit(filtered());const pts=filtered().filter(hasPoint).map(r=>point(r.lat,r.lon));if(!pts.length)return setView([0,0,1000,500]);const xs=pts.map(p=>p.x),ys=pts.map(p=>p.y),xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=Math.min(...ys),ymax=Math.max(...ys),w=Math.min(1100,Math.max(45,(xmax-xmin)*1.35,(ymax-ymin)*2.7));setView([(xmin+xmax-w)/2,(ymin+ymax-w/2)/2,w,w/2]);}
+function fit(){if(detailReady&&detailMap)return detailMap.fit(rows);const pts=filtered().filter(hasPoint).map(r=>point(r.lat,r.lon));if(!pts.length)return setView([0,0,1000,500]);const xs=pts.map(p=>p.x),ys=pts.map(p=>p.y),xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=Math.min(...ys),ymax=Math.max(...ys),w=Math.min(1100,Math.max(45,(xmax-xmin)*1.35,(ymax-ymin)*2.7));setView([(xmin+xmax-w)/2,(ymin+ymax-w/2)/2,w,w/2]);}
 function edit(id){if(!editable())return;selected=rows.find(r=>r.id===id);if(!selected)return;$('editName').textContent=selected.name;$('editLocation').textContent=`${selected.city}, ${selected.country} · DUNS ${selected.duns}`;$('editLat').value=selected.lat??'';$('editLon').value=selected.lon??'';const list=$('candidateList');list.replaceChildren();if(selected.candidates?.length){list.append(el('p','Review the location candidates and select the correct city:'));for(const candidate of selected.candidates){const b=el('button',candidate.label,'quiet');b.type='button';b.onclick=()=>{if(!editable()||!selected)return;chooseCandidate(selected,candidate);changed();$('editDialog').close();render();notice('City selected. This dot is approximate.');};list.append(b);}}$('editDialog').showModal();}
 function importText(text){if(!editable())return;try{const imported=parseSuppliers(text);if(rows.length&&!confirm('Replace the working list with this import? The shared list changes only when you save.'))return;for(const r of imported)offlineMatch(r);rows=imported;$('search').value='';$('statusFilter').value='';$('countryFilter').value='';$('mapPopup').hidden=true;changed();render();fit();notice('Imported '+rows.length+' suppliers. '+rows.filter(hasPoint).length+' mapped; '+rows.filter(r=>!hasPoint(r)).length+' need review. Save shared list to keep these changes.');}catch(e){notice(e.message,true);}}
 async function locate(){if(!editable())return;const requestEpoch=epoch;if(!$('lookupConsent').checked){notice('Select the city + country lookup checkbox first.',true);return;}const candidates=rows.filter(r=>!hasPoint(r)&&r.city&&r.country&&!r.candidates?.length);const keys=[...new Set(candidates.map(r=>norm(r.country)+'|'+norm(r.city)))].slice(0,20);if(!keys.length){notice('No unresolved city names to look up. Review ambiguous matches in the register.');return;}busy=true;cancel=false;controls();$('cancelButton').hidden=false;$('locateButton').disabled=true;let count=0;try{for(const key of keys){if(cancel||requestEpoch!==epoch)break;const r=candidates.find(r=>norm(r.country)+'|'+norm(r.city)===key);let matches=cache.get(key);if(!matches){const pause=Math.max(0,1200-(Date.now()-lastLookupAt));if(pause)await new Promise(res=>setTimeout(res,pause));if(cancel||requestEpoch!==epoch)break;const url=new URL('https://nominatim.openstreetmap.org/search');url.searchParams.set('city',r.city);url.searchParams.set('country',r.country);url.searchParams.set('format','jsonv2');url.searchParams.set('addressdetails','1');url.searchParams.set('limit','5');const code=getCode(r.country);if(code)url.searchParams.set('countrycodes',code.toLowerCase());notice(`Looking up ${++count}/${keys.length}: ${r.city}, ${r.country}…`);lastLookupAt=Date.now();lookupAbort=new AbortController();const timer=setTimeout(()=>lookupAbort?.abort(),15000);let response;try{response=await fetch(url,{signal:lookupAbort.signal,credentials:'omit',referrerPolicy:'strict-origin-when-cross-origin'});}finally{clearTimeout(timer);}if(requestEpoch!==epoch||cancel)break;if(!response.ok)throw Error(`Lookup service returned ${response.status}. Existing locations are preserved; try later or enter coordinates.`);const results=await response.json();matches=results.filter(m=>String(m.lat??'').trim()!==''&&String(m.lon??'').trim()!==''&&Number.isFinite(Number(m.lat))&&Number.isFinite(Number(m.lon))&&Math.abs(Number(m.lat))<=90&&Math.abs(Number(m.lon))<=180&&(!code||m.address?.country_code?.toUpperCase()===code)).map(m=>({lat:Number(m.lat),lon:Number(m.lon),label:m.display_name,source:'OpenStreetMap Nominatim'}));matches=[...new Map(matches.map(m=>[m.lat+','+m.lon,m])).values()];if(requestEpoch!==epoch||cancel)break;cache.set(key,matches);}for(const match of candidates.filter(a=>norm(a.country)+'|'+norm(a.city)===key)){match.candidates=matches;match.precision=matches.length?'Review city match':'Unresolved';}changed();render();}if(requestEpoch!==epoch)return;notice(cancel?'Lookup stopped. Completed locations are preserved.':'Lookup complete. Review unmatched or ambiguous rows; save to keep your list.');}catch(e){if(requestEpoch!==epoch)return;notice(cancel?'Lookup stopped.':e.message==='Failed to fetch'?'City lookup is unavailable. Use offline matches or enter coordinates in Review.':e.message,true);}finally{if(requestEpoch===epoch){busy=false;lookupAbort=null;$('cancelButton').hidden=true;controls();}}}
@@ -59,7 +150,7 @@ $('exportButton').onclick=()=>{if(identity)download('supplier-locations.csv',csv
 $('locateButton').onclick=locate;$('cancelButton').onclick=()=>{cancel=true;lookupAbort?.abort();};
 $('saveButton').onclick=saveShared;$('reloadButton').onclick=loadShared;
 $('clearButton').onclick=()=>{if(!editable())return;if(rows.length&&!confirm('Clear the working list? Click Save shared list afterwards to remove it for everyone.'))return;rows=[];cache.clear();$('pasteInput').value='';$('mapPopup').hidden=true;changed();render();if(detailReady)detailMap.world();else setView([0,0,1000,500]);notice('Working list cleared. This is unsaved; reload to restore the shared list or save to clear it for everyone.');};
-for(const id of ['search','countryFilter','statusFilter'])$(id).addEventListener('input',()=>{renderTable();renderDots();});
+for(const id of ['search','countryFilter','statusFilter'])$(id).addEventListener('input',renderTable);
 $('worldButton').onclick=()=>detailReady?detailMap.world():setView([0,0,1000,500]);$('europeButton').onclick=()=>detailReady?detailMap.europe():setView([440,60,220,110]);$('fitButton').onclick=fit;$('zoomIn').onclick=()=>zoom(.7);$('zoomOut').onclick=()=>zoom(1.4);
 $('closeEdit').onclick=()=>$('editDialog').close();
 $('removeLocation').onclick=()=>{if(!editable()||!selected)return;selected.lat=null;selected.lon=null;selected.precision='Unresolved';selected.source='';selected.candidates=[];$('editDialog').close();changed();render();};
@@ -99,14 +190,14 @@ async function startDetailedMap(requestEpoch){
  try{
   const controller=await createSupplierMap({
    container:$('detailMap'),signal:abort.signal,
-   onSelect:ids=>{if(current()){const selected=filtered().filter(r=>ids.includes(r.id));if(selected.length)popup(selected);}},
+   onSelect:ids=>{if(current()){const selectedIds=new Set(ids);const selected=rows.filter(r=>selectedIds.has(r.id));if(selected.length)popup(selected);}},
    onStatus:(message,error=false)=>{if(current()){$('mapStatus').textContent=message;$('mapStatus').classList.toggle('map-error',error);}},
-   onReady:()=>{ready=true;if(current()&&detailMap){showDetailedMap(true);detailMap.update(filtered());detailMap.fit(filtered());}}
+   onReady:()=>{ready=true;if(current()&&detailMap){showDetailedMap(true);detailMap.update(mapDisplayRows());detailMap.fit(rows);}}
   });
   if(!current()){controller.destroy();return;}
   detailMap=controller;
-  detailMap.update(filtered());
-  if(ready){showDetailedMap(true);detailMap.resize();detailMap.fit(filtered());}
+  detailMap.update(mapDisplayRows());
+  if(ready){showDetailedMap(true);detailMap.resize();detailMap.fit(rows);}
  }catch(error){
   if(!current())return;
   detailMap?.destroy();detailMap=null;showDetailedMap(false);

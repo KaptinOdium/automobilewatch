@@ -24,7 +24,7 @@ test('compares a named employer and locality, preserving the original FWS decisi
   const [match] = run([row]);
   assert.deepEqual(match, {
     supplier: row, event: site, decision: 'candidate', reason: site.screening.reason,
-    basis: 'Company name and reported city match; verify the operating site', kind: 'company-city'
+    basis: 'Company name and reported city match; verify the operating site', kind: 'company-city', namedSite: true
   });
 });
 

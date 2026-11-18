@@ -27,3 +27,8 @@
 @media(max-width:720px){#detailMap{min-height:390px}.enhanced-map-ready .legend{max-width:220px;font-size:8px;gap:8px}.mapwrap .maplibregl-ctrl-attrib{font-size:8px}.mapwrap .empty{max-width:225px;padding:15px}}
 
 .map-status.map-error{color:var(--orange)}
+
+:root{--atlas-dot-red:#c53735;--atlas-dot-yellow:#f5c542;--atlas-dot-neutral:#64748b}
+.legend .dot.signal-red{background:var(--atlas-dot-red)}
+.legend .dot.signal-yellow{background:var(--atlas-dot-yellow)}
+.legend .dot.signal-neutral{background:var(--atlas-dot-neutral)}

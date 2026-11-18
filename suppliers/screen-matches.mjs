@@ -94,7 +94,11 @@ export function matchSuppliers(suppliers, calendar, core, today, countryCode) {
       const basis = relatedName ? 'Similar company name and reported city; verify the legal entity and site'
         : sameCity ? 'Company name and reported city match; verify the operating site'
         : 'Company name and country match; site unverified';
-      matches.push({supplier, event, decision, reason, basis, kind: sameCity ? 'company-city' : 'company-only'});
+      // A group notice can list several employers and several locations without
+      // pairing them. Reserve the verified-site indicator for one named employer.
+      const namedSite = exactName && sameCity && names.length === 1 &&
+        /^(?:named site|automotive plant|supplier site|workplace)$/u.test(words(event.scope));
+      matches.push({supplier, event, decision, reason, basis, kind: sameCity ? 'company-city' : 'company-only', namedSite});
     }
   }
   return matches;
