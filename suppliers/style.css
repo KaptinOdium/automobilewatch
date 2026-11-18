@@ -125,3 +125,14 @@ header .theme-toggle { margin-left: 0; flex: none; }
 @media (prefers-reduced-motion: no-preference) {
   .theme-toggle { transition: background-color .15s ease, border-color .15s ease, color .15s ease; }
 }
+.screening-body { padding: 0 clamp(16px, 3vw, 32px) 24px; }
+.screening-body p { line-height: 1.5; }
+.screening-body h3 { margin: 20px 0 4px; }
+.screening-body details { margin: 12px 0; }
+.screening-body summary { cursor: pointer; font-weight: 650; }
+.screening-body .tablewrap { overflow-x: auto; margin: 12px 0; }
+.screening-body table { min-width: 760px; width: 100%; }
+.screening-body td { white-space: normal; vertical-align: top; }
+.screening-body td p { margin: 4px 0; }
+.screening-body td small { display: block; }
+.screening-import label { display: block; }
