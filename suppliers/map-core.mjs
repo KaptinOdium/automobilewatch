@@ -13,15 +13,8 @@ export function supplierFeatures(rows) {
     features: mapRows(rows).map(row => ({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [row.lon, Math.max(-85.051129, Math.min(85.051129, row.lat))] },
-      properties: { supplierId: row.id, signalRank: row.screeningLevel === 'red' ? 2 : row.screeningLevel === 'yellow' ? 1 : 0 }
+      properties: { supplierId: row.id, approximate: row.precision === 'Approximate city' }
     }))
-  };
-}
-
-export function supplierMapSource(rows) {
-  return {
-    type: 'geojson', data: supplierFeatures(rows), cluster: true, clusterMaxZoom: 15, clusterRadius: 48,
-    clusterProperties: { signalRank: ['max', ['get', 'signalRank']] }
   };
 }
 

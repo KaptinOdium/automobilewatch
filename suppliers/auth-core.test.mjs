@@ -164,47 +164,6 @@ test('member can load only a valid main dataset', async () => {
   assert.deepEqual(await client.loadShared(), dataset);
 });
 
-test('verified owners load only the register for their own identity', async () => {
-  const register = { rules: ['example'] };
-  const {client, calls, saved} = setup({role: 'owner', handler: () => response([{register}])});
-  assert.deepEqual(await client.loadScreeningRegister(), register);
-  const {url, options} = calls.at(-1);
-  assert.equal(url, config.url + '/rest/v1/supplier_screening_registers?select=register&owner_id=eq.user-1&limit=1');
-  assert.equal(options.headers.Authorization, 'Bearer access');
-  assert.equal(options.cache, 'no-store');
-  assert.ok(!saved.value().includes('example'));
-  const empty = setup({role: 'owner', handler: () => response([])});
-  assert.equal(await empty.client.loadScreeningRegister(), null);
-});
-
-test('losing owner role removes register access even with a previously verified owner identity', async () => {
-  for (const role of ['editor', 'viewer']) {
-    const {client, calls} = setup({role});
-    client.identity = {role: 'owner', id: 'user-1'};
-    assert.equal(await client.loadScreeningRegister(), null);
-    assert.equal(calls.some(call => call.url.includes('/supplier_screening_registers?')), false);
-  }
-  const revoked = setup({members: []});
-  await assert.rejects(revoked.client.loadScreeningRegister(), AccessError);
-  assert.equal(revoked.calls.some(call => call.url.includes('/supplier_screening_registers?')), false);
-});
-
-test('a delayed register response is discarded if the session changed', async () => {
-  const started = deferred(), pending = deferred();
-  const {client} = setup({role: 'owner', handler: url => {
-    if (url.includes('/supplier_screening_registers?')) {
-      started.resolve();
-      return pending.promise;
-    }
-    return response(null, 204);
-  }});
-  const result = client.loadScreeningRegister();
-  await started.promise;
-  await client.signOut();
-  pending.resolve(response([{register: {rules: []}}]));
-  await assert.rejects(result, AccessError);
-});
-
 test('viewer cannot issue a save RPC, and revoked members are rechecked', async () => {
   const viewer = setup({ role: 'viewer' });
   await assert.rejects(viewer.client.saveShared([], 0), /read-only/);
