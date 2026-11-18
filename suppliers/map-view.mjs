@@ -1,4 +1,4 @@
-import { mapRows, supplierFeatures, supplierMapSource, supplierBounds } from './map-core.mjs?v=20261118-2';
+import { mapRows, supplierFeatures, supplierBounds } from './map-core.mjs?v=20261112-3';
 
 const VERSION = '6.17.0';
 const MODULE_URL = `https://cdn.jsdelivr.net/npm/maplibre-gl@${VERSION}/dist/maplibre-gl.mjs`;
@@ -77,28 +77,23 @@ export async function createSupplierMap({ container, onSelect = () => {}, onStat
     // must never discard a newer filter/update; the worker accepts setData then.
     if (!live() || !styleReady) return;
     if (!map.getSource(SOURCE)) {
-      map.addSource(SOURCE, supplierMapSource(currentRows));
-      const rank = ['get', 'signalRank'];
-      const fill = ['match', rank, 2, '#c53735', 1, '#f5c542', '#64748b'];
-      const outline = theme === 'dark' ? '#192632' : '#ffffff';
-      map.addLayer({ id: CLUSTERS, type: 'circle', source: SOURCE, filter: ['has', 'point_count'],
-        layout: { 'circle-sort-key': rank }, paint: {
-        'circle-color': fill,
+      map.addSource(SOURCE, { type: 'geojson', data: supplierFeatures(currentRows), cluster: true, clusterMaxZoom: 15, clusterRadius: 48 });
+      map.addLayer({ id: CLUSTERS, type: 'circle', source: SOURCE, filter: ['has', 'point_count'], paint: {
+        'circle-color': theme === 'dark' ? '#29516b' : '#123a50',
         'circle-radius': ['step', ['get', 'point_count'], 20, 25, 25, 100, 31],
-        'circle-stroke-width': 2.5, 'circle-stroke-color': outline
+        'circle-stroke-width': 3, 'circle-stroke-color': theme === 'dark' ? '#85d4d0' : '#ffffff', 'circle-opacity': 0.95
       }});
       map.addLayer({ id: COUNTS, type: 'symbol', source: SOURCE, filter: ['has', 'point_count'], layout: {
-        'text-field': ['to-string', ['get', 'point_count_abbreviated']], 'text-font': ['Noto Sans Bold'], 'text-size': 13, 'text-allow-overlap': true
-      }, paint: { 'text-color': ['case', ['==', rank, 1], '#332704', '#ffffff'] } });
-      map.addLayer({ id: POINTS, type: 'circle', source: SOURCE, filter: ['!', ['has', 'point_count']],
-        layout: { 'circle-sort-key': rank }, paint: {
-        'circle-color': fill,
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 2, ['match', rank, 2, 8, 1, 7, 4], 15, ['match', rank, 2, 11, 1, 10, 7]],
-        'circle-stroke-width': 2, 'circle-stroke-color': outline
+        'text-field': ['get', 'point_count_abbreviated'], 'text-font': ['Noto Sans Bold'], 'text-size': 13, 'text-allow-overlap': true
+      }, paint: { 'text-color': '#ffffff' } });
+      map.addLayer({ id: POINTS, type: 'circle', source: SOURCE, filter: ['!', ['has', 'point_count']], paint: {
+        'circle-color': ['case', ['get', 'approximate'], theme === 'dark' ? '#47c8b9' : '#008577', theme === 'dark' ? '#91adff' : '#4264d9'],
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 2, 5, 8, 7, 15, 9],
+        'circle-stroke-width': 2.5, 'circle-stroke-color': theme === 'dark' ? '#102337' : '#ffffff', 'circle-opacity': 0.98
       }});
       map.addLayer({ id: SELECTED, type: 'circle', source: SOURCE, filter: ['==', ['get', 'supplierId'], selectedId], paint: {
         'circle-color': 'rgba(0,0,0,0)', 'circle-radius': 14, 'circle-stroke-width': 3,
-        'circle-stroke-color': theme === 'dark' ? '#c9e5f8' : '#143b58'
+        'circle-stroke-color': theme === 'dark' ? '#f9d579' : '#ae6a17'
       }});
     } else map.getSource(SOURCE).setData(supplierFeatures(currentRows));
     map.setFilter(SELECTED, ['==', ['get', 'supplierId'], selectedId]);
@@ -130,7 +125,7 @@ export async function createSupplierMap({ container, onSelect = () => {}, onStat
     map.touchZoomRotate.disableRotation();
     map.addControl(new api.ScaleControl({ maxWidth: 110, unit: 'metric' }), 'bottom-left');
     map.addControl(new api.FullscreenControl({ container: container.closest('.mapwrap') || container, pseudo: true }), 'top-right');
-    map.getCanvas().setAttribute('aria-label', 'Supplier screening map. Red and yellow indicate screening results. Each cluster shows its highest level. Use the results list for supplier details, arrow keys to pan, and plus or minus to zoom.');
+    map.getCanvas().setAttribute('aria-label', 'Detailed supplier map. Use arrow keys to pan, plus and minus to zoom.');
     signal?.addEventListener('abort', abort, { once: true });
     checkAbort(signal);
     timer = setTimeout(() => { if (!ready) rejectInitial(new Error('The detailed map could not load. The overview map is still available.')); }, 18000);
@@ -170,7 +165,7 @@ export async function createSupplierMap({ container, onSelect = () => {}, onStat
     await abortable(initial, signal);
     checkAbort(signal);
     return {
-      update(rows) { if (!live()) return; currentRows = mapRows(rows).map(row => ({ id: row.id, lat: row.lat, lon: row.lon, screeningLevel: row.screeningLevel })); if (!currentRows.some(row => row.id === selectedId)) selectedId = ''; installData(); },
+      update(rows) { if (!live()) return; currentRows = mapRows(rows).map(row => ({ id: row.id, lat: row.lat, lon: row.lon, precision: row.precision })); if (!currentRows.some(row => row.id === selectedId)) selectedId = ''; installData(); },
       fit(rows = currentRows) { if (!live()) return; const bounds = supplierBounds(rows); if (!bounds) return this.world(); map.fitBounds(bounds, { padding: { top: 65, bottom: 85, left: 55, right: 55 }, maxZoom: 11, duration: motion }); },
       world() { if (live()) map.easeTo({ center: [12, 28], zoom: 1.5, bearing: 0, pitch: 0, duration: motion }); },
       europe() { if (live()) map.fitBounds([[-15, 34], [38, 67]], { padding: 35, duration: motion }); },
