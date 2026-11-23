@@ -62,5 +62,30 @@
     const sourceRegistry = [...(live.sourceRegistry || []), ...(reviewed.sourceRegistry || [])].filter((item,index,arr) => arr.findIndex(other => other.url === item.url) === index);
     return {...live, ...newer, events, watchlist, changes, coverage:[...coverageByRegion.values()], sourceRegistry, rangeStart: starts[0], rangeEnd: ends.at(-1), screeningRules: reviewed.screeningRules || live.screeningRules, curatedAsOf: reviewed.asOf, curatedUpdatedAt: reviewed.updatedAt};
   }
-  return {merge, status, screening, names};
+  function createCalendarRefresh(initial, apply) {
+    let current = initial;
+    let hasPublishedData = false;
+    const savedTime = snapshot => Date.parse(snapshot?.updatedAt || snapshot?.asOf || '');
+    return async function refresh(sources) {
+      const outcomes = await Promise.allSettled(sources.map(async source => {
+        const payload = await source;
+        const next = payload?.data || payload;
+        const nextTime = savedTime(next);
+        if (!Array.isArray(next?.events) || !Array.isArray(next?.watchlist) || !Number.isFinite(nextTime)) return false;
+        const currentTime = savedTime(current);
+        const sameTime = nextTime === currentTime;
+        const nextRevision = Number(next.revision) || 0;
+        const currentRevision = Number(current?.revision) || 0;
+        if (nextTime < currentTime || (sameTime && nextRevision < currentRevision)) return false;
+        if (!hasPublishedData || !sameTime || nextRevision !== currentRevision) {
+          apply(next);
+          current = next;
+          hasPublishedData = true;
+        }
+        return true;
+      }));
+      return outcomes.some(result => result.status === 'fulfilled' && result.value);
+    };
+  }
+  return {merge, status, screening, names, createCalendarRefresh};
 });

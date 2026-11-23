@@ -13,7 +13,7 @@
   const currentDay=()=>{const p=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Prague',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());return ['year','month','day'].map(k=>p.find(x=>x.type===k).value).join('-');};
   const monthStart=iso=>new Date(Date.UTC(+iso.slice(0,4),+iso.slice(5,7)-1,1,12));
   const defaultEnd=iso=>{const d=dateObject(iso);d.setUTCMonth(d.getUTCMonth()+3);d.setUTCDate(d.getUTCDate()-1);return isoDate(d);};
-  let data={events:[],watchlist:[],coverage:[],changes:[]}, events=[],watchlist=[], month, minMonth,maxMonth,view='map',toastTimer,loading=false,fetchError='',offline=location.protocol==='file:',hasServerData=false;
+  let data={events:[],watchlist:[],coverage:[],changes:[]}, events=[],watchlist=[], month, minMonth,maxMonth,view='map',toastTimer,loading=false,refreshUnavailable=false,offline=location.protocol==='file:',hasPublishedData=false;
   let timelineDay=null,timelineCursor=null,timelineTimer=0;
   function timestamp(value){if(!value)return 'Not recorded';const d=new Date(value);return Number.isNaN(d.valueOf())?fmt(value):new Intl.DateTimeFormat('en-GB',{dateStyle:'medium',timeStyle:'short',timeZone:'Europe/Prague'}).format(d)+' Prague';}
   function regionFor(e){if(regions.includes(e.region))return e.region;if(e.region==='Australia/Oceania'||e.region==='Oceania'||e.region==='Australia')return 'Australia / Oceania';return ({Mexico:'North America',Canada:'North America','United States':'North America',USA:'North America',Brazil:'South America',Argentina:'South America',Chile:'South America',Australia:'Australia / Oceania','New Zealand':'Australia / Oceania','South Africa':'Africa',India:'Asia',China:'Asia','South Korea':'Asia'})[e.country]||e.region||'Unspecified';}
@@ -99,9 +99,8 @@
     const elapsed=data.updatedAt?Date.now()-new Date(data.updatedAt).valueOf():Date.now()-dateObject(data.asOf||currentDay()).valueOf();
     const warnings=[];
     if(offline)warnings.push('Portable snapshot — this saved copy does not update automatically.');
-    if(fetchError)warnings.push(hasServerData?'The latest refresh could not be loaded. Showing the last successfully loaded data.':'The shared data could not be loaded. Showing the bundled fallback snapshot.');
+    if(refreshUnavailable)warnings.push(hasPublishedData?'The latest refresh is unavailable. Showing the last verified calendar.':'Calendar updates are unavailable. Showing the bundled screening snapshot.');
     if(Number.isFinite(elapsed)&&elapsed>36*3600000)warnings.push('Research is more than 36 hours old. Check sources for subsequent changes.');
-    if(data.curatedAsOf)warnings.push('Saved screening review: '+fmt(data.curatedAsOf)+'. Each event retains its own evidence date; this is not a new worldwide scan.');
     if(!data.updatedAt)warnings.push('Exact refresh time has not been recorded.');
     $('refresh-banner').textContent=warnings.join(' ');$('refresh-banner').hidden=!warnings.length;
   }
@@ -117,14 +116,27 @@
     syncTimelineBounds();
     render();
   }
-  async function refresh(initial=false){
-    if(loading)return;loading=true;
+  const refreshCalendar=core.createCalendarRefresh(window.STRIKE_DATA, next=>{
+    applyData(next);
+    hasPublishedData=true;
+    refreshUnavailable=false;
+    renderHeader();
+  });
+  async function readCalendar(url){
+    const response=await fetch(url,{cache:'no-store',credentials:'omit',signal:AbortSignal.timeout(15000)});
+    if(!response.ok)throw new Error('Calendar request failed: '+response.status);
+    return response.json();
+  }
+  async function refresh(){
+    if(offline||loading)return;
+    loading=true;
     try{
-      if(offline){if(initial)applyData(window.STRIKE_DATA||{events:[],watchlist:[]});return;}
-      const response=await fetch('https://auto-strike-watch-vw-oct-2026.speedycomet512.chatgpt.site/api/calendar',{cache:'no-store',credentials:'omit',signal:AbortSignal.timeout(15000)});
-      if(!response.ok)throw new Error('HTTP '+response.status);const result=await response.json();fetchError='';hasServerData=true;applyData(result);
-    }catch(error){fetchError=String(error.message||error);if(initial)applyData(window.STRIKE_DATA||{events:[],watchlist:[]});else renderHeader();}
-    finally{loading=false;}
+      refreshUnavailable=!(await refreshCalendar([
+        readCalendar('./latest-calendar.json'),
+        readCalendar('https://auto-strike-watch-vw-oct-2026.speedycomet512.chatgpt.site/api/calendar')
+      ]));
+      renderHeader();
+    }finally{loading=false;}
   }
   // Geographic markers represent the country named in a record, never a precise plant.
   let mapExtent='world', mapReady=false, mapFailed=false, mapCountries=[], countryLookup=new Map(), mapGroups=new Map();
@@ -375,6 +387,6 @@
     selected.forEach(e=>{const end=dateObject(e.endDate||e.date);end.setUTCDate(end.getUTCDate()+1);const s=stateOf(e),description=[typeNames[e.category],stateNames[s],e.status,e.summary,e.impact,e.time?'Published time: '+e.time:'','Last checked: '+(e.lastChecked||data.asOf),'Snapshot only. No subscription to later changes. All-day placement does not establish duration or production loss.',...sourceDescription(e)].filter(Boolean).join('\n\n');const status=['cancelled','suspended'].includes(s)?'CANCELLED':(['risk','postponed','past','unverified'].includes(s)||e.status==='Conditional deadline'?'TENTATIVE':'CONFIRMED');lines.push('BEGIN:VEVENT','UID:'+icsEscape(e.id)+'@auto-strike-watch.local','DTSTAMP:'+stamp,'SEQUENCE:'+(Number(data.revision)||0),'DTSTART;VALUE=DATE:'+e.date.replaceAll('-',''),'DTEND;VALUE=DATE:'+isoDate(end).replaceAll('-',''),'SUMMARY:'+icsEscape('['+stateNames[s]+'] '+e.title),'DESCRIPTION:'+icsEscape(description),'LOCATION:'+icsEscape([e.site,e.country].filter(Boolean).join(', ')),'TRANSP:TRANSPARENT','STATUS:'+status);if(e.sources?.[0]?.url)lines.push('URL:'+e.sources[0].url);lines.push('END:VEVENT');});
     lines.push('END:VCALENDAR');download('auto-strike-watch-'+data.asOf+'.ics',lines.map(foldLine).join('\r\n')+'\r\n','text/calendar;charset=utf-8');toast('Filtered calendar snapshot downloaded. Future changes are not subscribed.');});
   $('export-csv').addEventListener('click',()=>{const selected=selectedEvents();if(!selected.length)return;const columns=['Start date','End date','Entry type','State','Title','Company','Region','Country','Site','Relevance','Scope','Status detail','Summary','Impact / uncertainty','Published time','Last checked','FWS decision','FWS rationale','Sources with dates','Snapshot date','Revision'];const safe=value=>{let s=String(value??'');if(/^[=+\-@\t\r]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';};const rows=[columns,...selected.map(e=>[e.date,e.endDate||'',typeNames[e.category],stateNames[stateOf(e)],e.title,e.company,regionFor(e),e.country,e.site,relevanceNames[e.relevance],e.scope,e.status,e.summary,e.impact,e.time,e.lastChecked||data.asOf,core.names[core.screening(e,currentDay()).decision],core.screening(e,currentDay()).reason,sourceDescription(e).join(' | '),data.asOf,data.revision])];download('auto-strike-watch-'+data.asOf+'.csv','\uFEFF'+rows.map(row=>row.map(safe).join(',')).join('\r\n'),'text/csv;charset=utf-8');toast('Filtered CSV downloaded with status, source dates and last-checked dates.');});
-  applyData(window.STRIKE_DATA||{events:[],watchlist:[]});loadMap();refresh(true);setInterval(()=>{if(!document.hidden)refresh();},5*60*1000);document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseTimeline();else refresh();});
+  applyData(window.STRIKE_DATA||{events:[],watchlist:[]});loadMap();refresh();setInterval(()=>{if(!document.hidden)refresh();},5*60*1000);document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseTimeline();else refresh();});
 })();
 

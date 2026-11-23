@@ -56,3 +56,48 @@ test('every retained calendar candidate has dated evidence and an explicit scree
  assert.ok(all.every(e=>e.lastChecked&&e.sources?.length&&e.screening?.decision));
  assert.ok(!all.some(e=>e.id.includes('HALIFAX')));
 });
+
+const {createCalendarRefresh}=require('./strike-core.js');
+const snapshot=(date, revision)=>({asOf:date,revision,events:[],watchlist:[]});
+test('a same-origin update displays immediately even if the live API is slow or fails',async()=>{
+  let rejectLive;
+  const live=new Promise((resolve,reject)=>{rejectLive=reject;});
+  const published=snapshot('2026-11-23',26);
+  const applied=[];
+  const refresh=createCalendarRefresh(snapshot('2026-11-12',14),data=>applied.push(data));
+  const pending=refresh([Promise.resolve(published),live]);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(applied,[published]);
+  rejectLive(new Error('Unavailable'));
+  assert.equal(await pending,true);
+  assert.equal(await refresh([Promise.reject(new Error('Offline'))]),false);
+  assert.deepEqual(applied,[published]);
+});
+test('late and subsequent responses cannot roll the calendar back',async()=>{
+  let deliverOld;
+  const stale=new Promise(resolve=>{deliverOld=resolve;});
+  const applied=[];
+  const refresh=createCalendarRefresh(null,data=>applied.push(data.revision));
+  const latest=snapshot('2026-11-23',26);
+  const pending=refresh([stale,Promise.resolve({data:latest})]);
+  await new Promise(resolve=>setImmediate(resolve));
+  deliverOld(snapshot('2026-11-22',25));
+  assert.equal(await pending,true);
+  assert.equal(await refresh([snapshot('2026-11-23',25)]),false);
+  assert.equal(await refresh([latest]),true);
+  assert.deepEqual(applied,[26]);
+});
+test('invalid payloads and failed renders do not mark new revisions loaded',async()=>{
+  const initial=snapshot('2026-11-22',25);
+  const next=snapshot('2026-11-23',26);
+  let fail=true;
+  const applied=[];
+  const refresh=createCalendarRefresh(initial,data=>{
+    if(fail)throw new Error('invalid calendar for display');
+    applied.push(data);
+  });
+  assert.equal(await refresh([{...next,events:null},{...next,asOf:'invalid'},next]),false);
+  fail=false;
+  assert.equal(await refresh([next]),true);
+  assert.deepEqual(applied,[next]);
+});
